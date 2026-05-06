@@ -1,3 +1,0 @@
-include pangflow/doc/README.mdown
-graft pangflow/tests
-graft pangflow/templates

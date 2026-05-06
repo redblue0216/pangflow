@@ -1,0 +1,49 @@
+# PangFlow v0.2.7 标准工作流配置文件（零外部依赖）
+# 声明式配置所有 OPS 行为，包括环境、存储、日志、服务、节点参数等
+
+[workflow]
+name = "demo-workflow"
+version = "1.0.0"
+description = "PangFlow v0.2.7 标准演示工作流 —— 纯 Python 标准库"
+
+[workflow.schedule]
+type = "cron"
+expression = "0 * * * *"
+
+[workflow.env]
+name = "demo-workflow"
+python = "3.13"
+
+[workflow.env.conda]
+channels = ["conda-forge"]
+dependencies = []
+
+[workflow.env.pip]
+dependencies = []
+
+[workflow.storage]
+default_backend = "local"
+
+[workflow.storage.local]
+base_path = "~/.pangflow/data"
+
+[workflow.log]
+level = "INFO"
+backend = "sqlite"
+format = "structured"
+
+[workflow.serve]
+enabled = true
+port = 8000
+host = "127.0.0.1"
+
+[[workflow.serve.endpoints]]
+name = "demo_predict"
+path = "/api/v1/predict"
+method = "POST"
+handler = "demo_predict_service"
+
+[workflow.nodes.process-data]
+timeout = 60
+retries = 1
+log_level = "INFO"

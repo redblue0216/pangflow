@@ -1,0 +1,49 @@
+# PangFlow v0.2.7 sklearn 工作流配置文件（需独立 conda 环境）
+# 使用 sklearn Iris 数据集训练 RandomForest 分类器
+
+[workflow]
+name = "sklearn-iris-workflow"
+version = "1.0.0"
+description = "PangFlow v0.2.7 sklearn Iris 演示工作流"
+
+[workflow.schedule]
+type = "cron"
+expression = "0 2 * * *"
+
+[workflow.env]
+name = "sklearn-iris-workflow"
+python = "3.13"
+
+[workflow.env.conda]
+channels = ["conda-forge"]
+dependencies = ["numpy", "scikit-learn"]
+
+[workflow.env.pip]
+dependencies = ["requests"]
+
+[workflow.storage]
+default_backend = "local"
+
+[workflow.storage.local]
+base_path = "~/.pangflow/data"
+
+[workflow.log]
+level = "INFO"
+backend = "sqlite"
+format = "structured"
+
+[workflow.serve]
+enabled = true
+port = 8001
+host = "127.0.0.1"
+
+[[workflow.serve.endpoints]]
+name = "iris_predict"
+path = "/api/v1/predict"
+method = "POST"
+handler = "iris_predict_service"
+
+[workflow.nodes.sklearn-train]
+timeout = 300
+retries = 1
+log_level = "INFO"
