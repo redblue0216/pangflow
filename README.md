@@ -1,4 +1,4 @@
-# PangFlow v0.2.7
+# PangFlow v0.2.8
 
 > **算法工程师视角的零摩擦工作流编排框架**
 
@@ -165,7 +165,7 @@ def demo_predict_service(request: PredictRequest) -> PredictResponse:
 [workflow]
 name = "demo-workflow"
 version = "1.0.0"
-description = "PangFlow v0.2.7 标准演示工作流 —— 纯 Python 标准库"
+description = "PangFlow v0.2.8 标准演示工作流 —— 纯 Python 标准库"
 
 [workflow.schedule]
 type = "cron"

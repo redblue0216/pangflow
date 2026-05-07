@@ -51,19 +51,45 @@ class DatabaseManager:
         logger.debug("Database tables created/verified.")
 
     def _migrate_columns(self) -> None:
-        """Auto-migrate: add missing columns to existing SQLite tables."""
+        """Auto-migrate: add missing columns and rebuild tables when nullable constraints change."""
         if not self.database_url.startswith("sqlite"):
             return
         from sqlalchemy import inspect, text
 
         inspector = inspect(self._engine)
         with self._engine.connect() as conn:
-            for table_name, table in Base.metadata.tables.items():
+            for table_name, table in list(Base.metadata.tables.items()):
                 if not inspector.has_table(table_name):
                     continue
-                existing_cols = {c["name"] for c in inspector.get_columns(table_name)}
+                existing_columns = {c["name"]: c for c in inspector.get_columns(table_name)}
+                existing_col_names = set(existing_columns.keys())
+                model_col_names = {c.name for c in table.columns}
+
+                # Detect nullable constraint changes that require table rebuild
+                needs_rebuild = False
                 for col in table.columns:
-                    if col.name not in existing_cols:
+                    if col.name in existing_columns:
+                        existing_nullable = existing_columns[col.name]["nullable"]
+                        if existing_nullable != col.nullable:
+                            needs_rebuild = True
+                            logger.info(
+                                "Column '%s.%s' nullable changed (%s -> %s) – table will be rebuilt",
+                                table_name, col.name, existing_nullable, col.nullable,
+                            )
+
+                # Also rebuild if any column was removed from the model
+                dropped_cols = existing_col_names - model_col_names
+                if dropped_cols:
+                    needs_rebuild = True
+                    logger.info("Columns %s removed from '%s' – table will be rebuilt", dropped_cols, table_name)
+
+                if needs_rebuild:
+                    self._rebuild_table(conn, table_name, table, existing_columns)
+                    continue
+
+                # Add missing columns
+                for col in table.columns:
+                    if col.name not in existing_col_names:
                         col_type = col.type.compile(dialect=self._engine.dialect)
                         nullable = "NULL" if col.nullable else "NOT NULL"
                         default = ""
@@ -80,6 +106,36 @@ class DatabaseManager:
                             logger.info(f"Added missing column '{col.name}' to table '{table_name}'")
                         except Exception as exc:
                             logger.warning(f"Failed to add column '{col.name}' to '{table_name}': {exc}")
+
+    def _rebuild_table(self, conn, table_name, table, existing_columns):
+        """Rebuild a SQLite table to match the current model definition."""
+        from sqlalchemy import text, schema
+
+        temp_name = f"{table_name}_new"
+        # Drop temp table if it exists from a previous failed run
+        conn.execute(text(f'DROP TABLE IF EXISTS "{temp_name}"'))
+        conn.commit()
+
+        # Use SQLAlchemy's CreateTable to generate correct DDL
+        new_table = schema.Table(temp_name, table.metadata, *[
+            col.copy() for col in table.columns
+        ])
+        create_ddl = str(schema.CreateTable(new_table).compile(dialect=self._engine.dialect))
+        conn.execute(text(create_ddl))
+        table.metadata.remove(new_table)
+
+        # Copy data from old table (only columns that exist in both)
+        common_cols = [c.name for c in table.columns if c.name in existing_columns]
+        if common_cols:
+            col_str = ", ".join(f'"{c}"' for c in common_cols)
+            insert_stmt = f'INSERT INTO "{temp_name}" ({col_str}) SELECT {col_str} FROM "{table_name}"'
+            conn.execute(text(insert_stmt))
+
+        # Drop old table and rename new one
+        conn.execute(text(f'DROP TABLE "{table_name}"'))
+        conn.execute(text(f'ALTER TABLE "{temp_name}" RENAME TO "{table_name}"'))
+        conn.commit()
+        logger.info(f"Rebuilt table '{table_name}' to match current schema")
 
     @contextmanager
     def get_session(self) -> Generator[Session, None, None]:

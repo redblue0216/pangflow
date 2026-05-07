@@ -27,9 +27,10 @@ logger = logging.getLogger(__name__)
 class MetricObserver:
     """Subscriber that captures metrics from METRIC_RECORD and NODE_COMPLETE."""
 
-    def __init__(self, store_in_db: bool = False):
+    def __init__(self, store_in_db: bool = False, max_in_memory: int = 10000):
         self._metrics: List[Dict[str, Any]] = []
         self.store_in_db = store_in_db
+        self._max_in_memory = max_in_memory
 
     # -- callbacks ---------------------------------------------------------- #
 
@@ -44,6 +45,8 @@ class MetricObserver:
             "timestamp": payload.get("timestamp", datetime.now().isoformat()),
         }
         self._metrics.append(record)
+        if len(self._metrics) > self._max_in_memory:
+            self._metrics = self._metrics[-self._max_in_memory:]
 
         if self.store_in_db:
             self._persist(record)

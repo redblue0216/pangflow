@@ -43,6 +43,7 @@ class FlowCompiler:
         dag: DAGBuilder,
         env_manager: EnvManager,
         workflow_name: str = "workflow",
+        workflow_id: Optional[str] = None,
     ) -> Callable:
         if not PREFECT_AVAILABLE:
             raise RuntimeError(
@@ -50,12 +51,13 @@ class FlowCompiler:
             )
 
         layers = dag.topological_sort()
+        effective_wf_id = self._resolve_workflow_id(workflow_id or workflow_name)
 
         # Build a Prefect @task wrapper for every node.
         task_map: Dict[str, Callable] = {}
         for meta in dag.nodes.values():
             task_map[meta.node_id] = self._wrap_task(
-                meta, env_manager, workflow_name
+                meta, env_manager, effective_wf_id, workflow_name, dag
             )
 
         @flow(name=workflow_name)
@@ -111,6 +113,8 @@ class FlowCompiler:
         meta: Any,  # NodeMetadata
         env_manager: EnvManager,
         workflow_id: str,
+        workflow_name: str,
+        dag: Any,
     ) -> Callable:
         try:
             env = env_manager.get_env(workflow_id)
@@ -132,6 +136,15 @@ class FlowCompiler:
 
             run_id = os.environ.get("PANGFLOW_RUN_ID", str(uuid.uuid4()))
 
+            # Inject log context so pf.log() / pf.log_metric() know current node
+            import pangflow as _pf
+            _pf._set_log_context(
+                workflow_id=workflow_id,
+                node_id=meta.node_id,
+                node_name=meta.name,
+                run_id=run_id,
+            )
+
             get_subject().publish(
                 "NODE_START",
                 {
@@ -141,7 +154,7 @@ class FlowCompiler:
                     "run_id": run_id,
                 },
             )
-            self._write_node_log(run_id, workflow_id, meta, status="running")
+            self._write_node_log(run_id, workflow_id, workflow_name, meta, status="running")
 
             started_at = time.time()
             try:
@@ -152,6 +165,9 @@ class FlowCompiler:
 
                 duration_ms = (time.time() - started_at) * 1000
 
+                # Track artifact produced by this node for lineage
+                import pangflow as _pf
+                output_artifact_id = getattr(_pf._log_context_local, '_last_artifact_id', None)
                 get_subject().publish(
                     "NODE_COMPLETE",
                     {
@@ -160,11 +176,17 @@ class FlowCompiler:
                         "workflow_id": workflow_id,
                         "run_id": run_id,
                         "duration_ms": duration_ms,
+                        "output_artifact_id": output_artifact_id,
                     },
                 )
                 self._write_node_log(
-                    run_id, workflow_id, meta, status="success", duration_ms=duration_ms
+                    run_id, workflow_id, workflow_name, meta, status="success", duration_ms=duration_ms
                 )
+                # Write lineage edges if this node produced an artifact
+                try:
+                    self._write_lineage_edges(workflow_id, meta, dag)
+                except Exception:
+                    pass  # lineage is best-effort
                 return result
             except Exception as exc:
                 duration_ms = (time.time() - started_at) * 1000
@@ -181,6 +203,7 @@ class FlowCompiler:
                 self._write_node_log(
                     run_id,
                     workflow_id,
+                    workflow_name,
                     meta,
                     status="failed",
                     duration_ms=duration_ms,
@@ -194,6 +217,7 @@ class FlowCompiler:
         self,
         run_id: str,
         workflow_id: str,
+        workflow_name: str,
         meta: Any,
         status: str,
         duration_ms: Optional[float] = None,
@@ -221,7 +245,7 @@ class FlowCompiler:
                 log = NodeLogModel(
                     timestamp=datetime.now(),
                     workflow_id=workflow_id,
-                    workflow_name=workflow_id,
+                    workflow_name=workflow_name,
                     node_id=meta.node_id,
                     node_name=meta.name,
                     log_type="auto",
@@ -236,12 +260,178 @@ class FlowCompiler:
         except Exception:
             logger.debug("Failed to write node log (DB may not be initialized)", exc_info=True)
 
-    def _run_in_conda(
-        self, env: Any, func: Callable, args: tuple, kwargs: dict
-    ) -> Any:
-        """Pragmatic conda wrapper – logs and falls back to direct call."""
+    def _write_lineage_edges(self, workflow_id: str, meta: Any, dag: Any) -> None:
+        """Write lineage edges from upstream artifacts to the current node's artifact.
+
+        Recursively searches upstream nodes when direct predecessors have not
+        produced an artifact themselves.
+        """
+        from pangflow.database.connection import get_db_manager
+        from pangflow.database.models import ArtifactModel, LineageEdgeModel
+
+        db = get_db_manager()
+        with db.get_session() as session:
+            artifact = (
+                session.query(ArtifactModel)
+                .filter_by(workflow_id=workflow_id, node_id=meta.node_id)
+                .order_by(ArtifactModel.created_at.desc())
+                .first()
+            )
+            if not artifact:
+                return
+
+            upstream_artifacts = self._find_upstream_artifacts(
+                session, workflow_id, meta.node_id, dag, set()
+            )
+            for ua in upstream_artifacts:
+                existing = (
+                    session.query(LineageEdgeModel)
+                    .filter_by(
+                        from_artifact_id=ua.artifact_id,
+                        to_artifact_id=artifact.artifact_id,
+                    )
+                    .first()
+                )
+                if not existing:
+                    session.add(
+                        LineageEdgeModel(
+                            from_artifact_id=ua.artifact_id,
+                            to_artifact_id=artifact.artifact_id,
+                            edge_type="data_flow",
+                        )
+                    )
+
+    def _find_upstream_artifacts(
+        self,
+        session: Any,
+        workflow_id: str,
+        node_id: str,
+        dag: Any,
+        visited: set,
+    ) -> List[Any]:
+        """Recursively find the nearest upstream artifacts for a node."""
+        from pangflow.database.models import ArtifactModel
+
+        if node_id in visited:
+            return []
+        visited.add(node_id)
+
+        upstream_edges = dag.get_upstream_edges(node_id)
+        upstream_node_ids = [e.from_node_id for e in upstream_edges]
+        if not upstream_node_ids:
+            return []
+
+        direct = (
+            session.query(ArtifactModel)
+            .filter(
+                ArtifactModel.workflow_id == workflow_id,
+                ArtifactModel.node_id.in_(upstream_node_ids),
+            )
+            .all()
+        )
+        if direct:
+            return direct
+
+        # Recurse into upstream-of-upstream
+        found: List[Any] = []
+        for uid in upstream_node_ids:
+            found.extend(
+                self._find_upstream_artifacts(session, workflow_id, uid, dag, visited)
+            )
+        return found
+
+    @staticmethod
+    def _resolve_workflow_id(wf_id: Optional[str]) -> str:
+        """If *wf_id* is a workflow name rather than a UUID, look up the UUID in DB.
+
+        Falls back to the original *wf_id* when the DB is unavailable or the
+        workflow has never been registered.
+        """
+        if not wf_id:
+            return ""
+        import re
+        if re.match(
+            r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            wf_id,
+            re.I,
+        ):
+            return wf_id
+        try:
+            from pangflow.database.connection import get_db_manager, initialize_database
+            from pangflow.database.models import WorkflowModel
+            from pangflow.utils.workspace import find_workspace
+
+            try:
+                db = get_db_manager()
+            except RuntimeError:
+                # Database not initialised (common when calling a workflow
+                # directly without going through the CLI).  Auto-discover
+                # the workspace and initialise.
+                ws_path = find_workspace()
+                if ws_path is not None:
+                    db_url = f"sqlite:///{ws_path / 'pangflow.db'}"
+                else:
+                    db_url = None
+                db = initialize_database(db_url)
+
+            with db.get_session() as session:
+                wf = (
+                    session.query(WorkflowModel)
+                    .filter_by(workflow_name=wf_id)
+                    .first()
+                )
+                if wf:
+                    return wf.id
+        except Exception:
+            pass
+        return wf_id
+
+    def _run_in_conda(self, env, func, args, kwargs):
+        import subprocess, sys, tempfile, cloudpickle, os
         env_name = getattr(env, "name", str(env))
         logger.info("Running node in conda env: %s", env_name)
-        # Full ``conda run`` implementation would serialise args and invoke
-        # a subprocess. For v0.2.7 we keep it simple and call in-process.
-        return func(*args, **kwargs)
+        
+        # Serialize function + args via cloudpickle
+        with tempfile.NamedTemporaryFile(mode="wb", suffix=".pkl", delete=False) as fh:
+            cloudpickle.dump((func, args, kwargs), fh)
+            input_path = fh.name
+        output_path = input_path + ".out"
+        script_path = input_path + ".py"
+        
+        # Propagate log context into the subprocess so pf.save_model() knows workflow/node
+        import pangflow as _pf
+        ctx = _pf._get_log_context()
+        
+        script = (
+            "import cloudpickle\n"
+            "import os\n"
+            "import pangflow as _pf\n"
+            f"os.environ['PANGFLOW_RUN_ID'] = {ctx.get('run_id')!r}\n"
+            f"_pf._set_log_context(\n"
+            f"    workflow_id={ctx.get('workflow_id')!r},\n"
+            f"    node_id={ctx.get('node_id')!r},\n"
+            f"    node_name={ctx.get('node_name')!r},\n"
+            f"    run_id={ctx.get('run_id')!r},\n"
+            f")\n"
+            f"with open({input_path!r}, 'rb') as fh:\n"
+            "    func, args, kwargs = cloudpickle.load(fh)\n"
+            "result = func(*args, **kwargs)\n"
+            f"with open({output_path!r}, 'wb') as fh:\n"
+            "    cloudpickle.dump(result, fh)\n"
+        )
+        with open(script_path, "w", encoding="utf-8") as fh:
+            fh.write(script)
+        
+        try:
+            cmd = ["conda", "run", "-n", env_name, "python", script_path]
+            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if proc.returncode != 0:
+                raise RuntimeError(f"Conda run failed: {proc.stderr}")
+            with open(output_path, "rb") as fh:
+                return cloudpickle.load(fh)
+        finally:
+            for p in (input_path, script_path, output_path):
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass

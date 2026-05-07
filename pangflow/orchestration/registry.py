@@ -193,13 +193,15 @@ def workflow(name=None, schedule=None, **kwargs):
             # The proxy __call__ already added them, but ensure they exist.
             dag.validate()
 
+            import os
             from pangflow.env.manager import EnvManager
             from pangflow.orchestration.compiler import FlowCompiler
 
             env_manager = EnvManager()
             compiler = FlowCompiler()
+            workflow_id = os.environ.get("PANGFLOW_WORKFLOW_ID")
             compiled_flow = compiler.compile(
-                dag, env_manager, workflow_name=workflow_name
+                dag, env_manager, workflow_name=workflow_name, workflow_id=workflow_id
             )
             return compiled_flow
 

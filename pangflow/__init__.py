@@ -4,7 +4,7 @@
 # Copyright (c) 2026 The PangFlow Authors. All rights reserved.
 
 """
-PangFlow v0.2.7 - Algorithm OPS Orchestration Tool
+PangFlow v0.2.11 - Algorithm OPS Orchestration Tool
 
 A workflow management framework that lets algorithm engineers write pure Python
 functions, connect them with the ``>>`` operator, and automatically compile to
@@ -44,23 +44,61 @@ Example
 ...     return forecast
 """
 
-__version__ = "0.2.7"
+__version__ = "0.2.11"
+
+from typing import Any, Dict, Optional
 
 from pangflow.orchestration import registry as _registry
 node = _registry.node
 workflow = _registry.workflow
 serve = _registry.serve
 from pangflow.observer.subject import get_subject
-from pangflow.storage.model_store import save_model, load_model
+from pangflow.storage.model_store import save_model as _save_model_impl, load_model
+
+def save_model(name: str, model: Any, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Save *model* under *name* using the default ModelStore."""
+    meta = dict(metadata or {})
+    ctx = _get_log_context()
+    meta.setdefault("workflow_id", ctx.get("workflow_id") or "")
+    meta.setdefault("node_id", ctx.get("node_id") or "")
+    upstream_artifact_id = getattr(_log_context_local, '_last_artifact_id', None)
+    result = _save_model_impl(
+        name, model, meta,
+        upstream_artifact_ids=[upstream_artifact_id] if upstream_artifact_id else None,
+    )
+    # Cache the artifact_id in log context so lineage can link it to the current node
+    _log_context_local._last_artifact_id = result.get("artifact_id")
+    return result
+
+
 from pangflow.storage.feature_store import load_feature
 from pangflow.core.config import get_param
 from pangflow.serve.tracer import get_trace_id
+from pangflow.observer import setup_default_observers
+
 # Re-bind after sub-module import to prevent module object shadowing the decorator
 serve = _registry.serve
 
 # Logging API injected at runtime by NodeTask pre_execute hook.
 # These module-level placeholders are overwritten when a node runs.
-_log_context = None
+import threading
+_log_context_local = threading.local()
+
+def _set_log_context(workflow_id: str = None, node_id: str = None, node_name: str = None, run_id: str = None) -> None:
+    """Set the current execution context for log/metric injection."""
+    _log_context_local.workflow_id = workflow_id
+    _log_context_local.node_id = node_id
+    _log_context_local.node_name = node_name
+    _log_context_local.run_id = run_id
+
+def _get_log_context() -> dict:
+    """Get the current execution context."""
+    return {
+        "workflow_id": getattr(_log_context_local, "workflow_id", None),
+        "node_id": getattr(_log_context_local, "node_id", None),
+        "node_name": getattr(_log_context_local, "node_name", None),
+        "run_id": getattr(_log_context_local, "run_id", None),
+    }
 
 
 def log(message: str, level: str = "INFO", **extra) -> None:
@@ -77,6 +115,7 @@ def log(message: str, level: str = "INFO", **extra) -> None:
     """
     from pangflow.observer.log_observer import LogObserver
 
+    ctx = _get_log_context()
     subject = get_subject()
     subject.publish(
         "LOG_RECORD",
@@ -85,6 +124,10 @@ def log(message: str, level: str = "INFO", **extra) -> None:
             "message": message,
             "extra": extra,
             "timestamp": __import__("datetime").datetime.now().isoformat(),
+            "workflow_id": ctx["workflow_id"],
+            "node_id": ctx["node_id"],
+            "node_name": ctx["node_name"],
+            "trace_id": ctx["run_id"],
         },
     )
 
@@ -101,6 +144,7 @@ def log_metric(name: str, value: float, **tags) -> None:
     **tags :
         Additional dimension tags.
     """
+    ctx = _get_log_context()
     subject = get_subject()
     subject.publish(
         "METRIC_RECORD",
@@ -109,6 +153,10 @@ def log_metric(name: str, value: float, **tags) -> None:
             "metric_value": value,
             "tags": tags,
             "timestamp": __import__("datetime").datetime.now().isoformat(),
+            "workflow_id": ctx["workflow_id"],
+            "node_id": ctx["node_id"],
+            "node_name": ctx["node_name"],
+            "run_id": ctx["run_id"],
         },
     )
 
@@ -126,3 +174,5 @@ __all__ = [
     "get_param",
     "get_trace_id",
 ]
+
+setup_default_observers()

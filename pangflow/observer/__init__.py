@@ -73,7 +73,7 @@ def setup_default_observers() -> list:
     """
     observers = [
         LogObserver(),
-        MetricObserver(),
+        MetricObserver(store_in_db=True),
         LineageObserver(),
         PrefectUIObserver(),
     ]

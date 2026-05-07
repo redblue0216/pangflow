@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""PangFlow v0.2.7 CLI – pangflowctl.
+"""PangFlow v0.2.11 CLI – pangflowctl.
 
 A modern typer-based CLI for workflow orchestration, environment management,
 serve lifecycle, model promotion and lineage inspection.
@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime
@@ -42,6 +43,7 @@ from pangflow.database.repository import ExecutionLogRepository, WorkflowReposit
 from pangflow.env.manager import EnvManager
 from pangflow.env.spec import CondaSpec, EnvSpec, PipSpec
 from pangflow.orchestration.registry import NodeRegistry
+from pangflow.orchestration.serve_compiler import ServeCompiler
 from pangflow.prefect_integration.deployment import DeploymentManager
 from pangflow.serve.manager import ServeManager
 from pangflow.storage.backend import LocalFileBackend
@@ -57,7 +59,7 @@ logger = logging.getLogger(__name__)
 console = Console()
 app = typer.Typer(
     name="pangflowctl",
-    help="PangFlow v0.2.7 – Algorithm OPS orchestration CLI",
+    help="PangFlow v0.2.11 – Algorithm OPS orchestration CLI",
     no_args_is_help=True,
 )
 
@@ -68,10 +70,15 @@ app = typer.Typer(
 
 @contextmanager
 def _db_session(db_manager):
-    """Provide a SQLAlchemy session that rolls back on error and closes cleanly."""
+    """Provide a SQLAlchemy session that auto-commits on success, rolls back on error, and closes cleanly.
+
+    Sets expire_on_commit=False so model attributes remain accessible after the block exits.
+    """
     session = db_manager._session_factory()
+    session.expire_on_commit = False
     try:
         yield session
+        session.commit()
     except Exception:
         session.rollback()
         raise
@@ -150,7 +157,13 @@ def _env_spec_from_toml(toml_path: Path, workflow_name: str) -> EnvSpec:
 
 
 def _lookup_workflow(session, name: str) -> WorkflowModel:
-    model = WorkflowRepository(session).get_by_name(name)
+    from pangflow.database.models import WorkflowModel
+    model = (
+        session.query(WorkflowModel)
+        .filter_by(workflow_name=name)
+        .order_by(WorkflowModel.created_at.desc())
+        .first()
+    )
     if model is None:
         console.print(f"[red]Error:[/red] Workflow not found: {name}")
         raise typer.Exit(1)
@@ -466,6 +479,9 @@ def register(
     command = ""
     if toml_path.with_suffix(".py").exists():
         command = f"python {toml_path.with_suffix('.py').name}"
+    schedule_data = {}
+    if hasattr(cfg, "schedule") and cfg.schedule and getattr(cfg.schedule, "expression", None):
+        schedule_data = {"type": cfg.schedule.type, "expression": cfg.schedule.expression}
     workflow_state = WorkflowState(
         workflow_id=str(uuid.uuid4()),
         workflow_name=wf_name,
@@ -476,6 +492,7 @@ def register(
         is_deployed=False,
         metadata={
             "description": cfg.description,
+            "schedule": schedule_data,
             "env": _serialize(cfg.env),
             "storage": _serialize(cfg.storage),
             "log": _serialize(cfg.log),
@@ -486,9 +503,25 @@ def register(
 
     with _db_session(db_manager) as session:
         repo = WorkflowRepository(session)
-        model = repo.create(workflow_state)
-        console.print(f"[green]Registered workflow[/green] {wf_name}")
-        console.print(f"  ID:   {model.id}")
+        existing = (
+            session.query(WorkflowModel)
+            .filter_by(workflow_name=wf_name)
+            .order_by(WorkflowModel.created_at.desc())
+            .first()
+        )
+        if existing is not None:
+            # Update existing workflow record
+            existing.command = command
+            existing.schedule_config = json.dumps(workflow_state.metadata)
+            existing.status = WorkflowStatus.REGISTERED.value
+            existing.is_deployed = False
+            existing.updated_at = datetime.now()
+            console.print(f"[green]Updated workflow[/green] {wf_name}")
+            console.print(f"  ID:   {existing.id}")
+        else:
+            model = repo.create(workflow_state)
+            console.print(f"[green]Registered workflow[/green] {wf_name}")
+            console.print(f"  ID:   {model.id}")
         console.print(f"  Type: {workflow_state.workflow_type.value}")
 
 
@@ -511,6 +544,15 @@ def deploy(
         repo = WorkflowRepository(session)
         model = _lookup_workflow(session, workflow_name)
         workflow_state = repo.to_workflow_state(model)
+
+        # If --cron not provided, read from TOML config stored in schedule_config
+        if cron is None and model.schedule_config:
+            import json
+            meta = json.loads(model.schedule_config) if isinstance(model.schedule_config, str) else model.schedule_config
+            schedule_cfg = meta.get("schedule", {}) if isinstance(meta, dict) else {}
+            if schedule_cfg and schedule_cfg.get("expression"):
+                cron = schedule_cfg["expression"]
+                console.print(f"[blue]Using schedule from config:[/blue] {cron}")
 
         deployment_manager = DeploymentManager()
         result = deployment_manager.deploy_to_server(
@@ -536,7 +578,7 @@ def deploy(
         model.prefect_serve_pid = prefect_serve_pid
         model.prefect_serve_status = "running" if prefect_serve_pid else "stopped"
         model.updated_at = datetime.now()
-        session.commit()
+
 
         repo.update_status(model.id, WorkflowStatus.DEPLOYED)
 
@@ -555,6 +597,18 @@ def deploy(
 
 deployment_app = typer.Typer(help="Manage Prefect deployment serve processes")
 app.add_typer(deployment_app, name="deployment")
+
+
+def _is_uuid(value: str) -> bool:
+    """Return True if *value* looks like a UUID."""
+    import re
+    return bool(
+        re.match(
+            r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            value,
+            re.I,
+        )
+    )
 
 
 def _is_process_running(pid: int) -> bool:
@@ -617,7 +671,7 @@ def deployment_serve(
             model.prefect_serve_pid = process.pid
             model.prefect_serve_status = "running"
             model.updated_at = datetime.now()
-            session.commit()
+
             console.print(f"[green]Started Prefect serve[/green] for {workflow_name} (PID: {process.pid})")
         except Exception as exc:
             console.print(f"[red]Failed to start serve:[/red] {exc}")
@@ -643,7 +697,7 @@ def deployment_stop(
             console.print(f"[yellow]Serve process (PID: {pid}) is not running[/yellow]")
             model.prefect_serve_pid = None
             model.prefect_serve_status = "stopped"
-            session.commit()
+
             return
 
         try:
@@ -655,7 +709,7 @@ def deployment_stop(
             model.prefect_serve_pid = None
             model.prefect_serve_status = "stopped"
             model.updated_at = datetime.now()
-            session.commit()
+
         except Exception as exc:
             console.print(f"[red]Failed to stop serve process:[/red] {exc}")
             raise typer.Exit(1)
@@ -776,13 +830,181 @@ def serve_start(
         model = _lookup_workflow(session, workflow_name)
         command = model.command
         working_dir = model.working_dir
+        model_id = model.id
 
-    # Build app and start in background so serve stop can work across CLI invocations.
-    app_obj = _build_trigger_app(command, working_dir)
+        # Clean stale service records for this workflow before starting a new one
+        stale = (
+            session.query(ServiceModel)
+            .filter_by(service_name=workflow_name)
+            .all()
+        )
+        for svc in stale:
+            if svc.pid and not _is_process_running(svc.pid):
+                session.delete(svc)
+
+    workspace_path = workspace.workspace_path
+
+    # Check for conda environment
+    env_manager = EnvManager()
+    env = env_manager.get_env(model_id)
+
+    def _discover_service_files(wp: Path, wf_name: str):
+        import glob
+        all_files = glob.glob(str(wp / "*service.py"))
+        if not all_files:
+            return []
+        exact = str(wp / f"{wf_name}_service.py")
+        under = str(wp / f"{wf_name.replace('-', '_')}_service.py")
+        matches = [f for f in all_files if f == exact or f == under]
+        if matches:
+            return matches
+        words = set(wf_name.replace('-', '_').lower().split('_'))
+        matches = [f for f in all_files if any(w in Path(f).stem.lower() for w in words)]
+        if matches:
+            return matches
+        plain = str(wp / "service.py")
+        if plain in all_files:
+            return [plain]
+        if len(all_files) == 1:
+            return all_files
+        return all_files
+
+    svc_files = _discover_service_files(workspace_path, workflow_name)
+
+    if env is not None:
+        # Conda isolation: generate a temporary script and run it via conda run
+        import tempfile
+        script_lines = [
+            "import sys",
+            f"sys.path.insert(0, {str(workspace_path)!r})",
+            "",
+            "import importlib.util",
+        ]
+        for svc_path in svc_files:
+            script_lines.append(f"spec = importlib.util.spec_from_file_location('_svc_', {svc_path!r})")
+            script_lines.append("if spec and spec.loader:")
+            script_lines.append("    mod = importlib.util.module_from_spec(spec)")
+            script_lines.append("    spec.loader.exec_module(mod)")
+        script_lines += [
+            "",
+            "from pangflow.orchestration.serve_compiler import ServeCompiler",
+            "from pangflow.orchestration.registry import NodeRegistry",
+            "from fastapi import FastAPI",
+            "import os",
+            "import subprocess",
+            "",
+            "serve_compiler = ServeCompiler()",
+            "endpoints = NodeRegistry().list_serve()",
+            "if endpoints:",
+            "    app = serve_compiler.compile(endpoints)",
+            "else:",
+            "    app = FastAPI(title='PangFlow Serve')",
+            "",
+            f"command = {command!r}",
+            f"working_dir = {working_dir!r}",
+            f"os.environ.setdefault('PANGFLOW_WORKFLOW_ID', {model_id!r})",
+            "",
+            "@app.post('/trigger')",
+            "def trigger():",
+            "    result = subprocess.run(command, shell=True, capture_output=True, text=True, cwd=working_dir, env=os.environ.copy())",
+            "    return {'returncode': result.returncode, 'stdout': result.stdout, 'stderr': result.stderr}",
+            "",
+            "if __name__ == '__main__':",
+            f"    import uvicorn",
+            f"    uvicorn.run(app, host={host!r}, port={port})",
+        ]
+        script_content = "\n".join(script_lines) + "\n"
+        with tempfile.NamedTemporaryFile(mode="w", suffix="_serve.py", delete=False, dir=str(workspace_path)) as fh:
+            fh.write(script_content)
+            script_path = fh.name
+
+        console.print(f"[blue]Starting serve in conda env:[/blue] {env.name}")
+        try:
+            if sys.platform == "win32":
+                proc = subprocess.Popen(
+                    ["conda", "run", "-n", env.name, "python", script_path],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                )
+            else:
+                proc = subprocess.Popen(
+                    ["conda", "run", "-n", env.name, "python", script_path],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    start_new_session=True,
+                )
+            time.sleep(3)
+            if proc.poll() is not None:
+                stdout, stderr = proc.communicate()
+                console.print(f"[red]Serve process failed:[/red] {stderr.decode()}")
+                raise typer.Exit(1)
+
+            with _db_session(db_manager) as session:
+                service = ServiceModel(
+                    service_name=workflow_name,
+                    status="running",
+                    host=host,
+                    port=port,
+                    pid=proc.pid,
+                    started_at=datetime.now(),
+                )
+                session.add(service)
+
+
+            console.print(f"[green]Serve started[/green] {workflow_name} at http://{host}:{port} (conda: {env.name})")
+            console.print("Press Ctrl+C to stop.")
+            try:
+                proc.wait()
+            except KeyboardInterrupt:
+                proc.terminate()
+                console.print(f"\n[yellow]Serve stopped[/yellow] {workflow_name}")
+        finally:
+            try:
+                os.unlink(script_path)
+            except OSError:
+                pass
+        return
+
+    # No conda env: run in-process via ServeManager
+    import importlib.util
+    for svc_path in svc_files:
+        spec = importlib.util.spec_from_file_location("_pangflow_svc_", svc_path)
+        if spec and spec.loader:
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+
+    serve_compiler = ServeCompiler()
+    endpoints = NodeRegistry().list_serve()
+    if endpoints:
+        app_obj = serve_compiler.compile(endpoints)
+    else:
+        from fastapi import FastAPI
+        app_obj = FastAPI(title="PangFlow Serve")
+
+    @app_obj.post("/trigger")
+    def trigger():
+        env = os.environ.copy()
+        env.setdefault("PANGFLOW_WORKFLOW_ID", model.id)
+        result = subprocess.run(command, shell=True, capture_output=True, text=True, cwd=working_dir, env=env)
+        return {"returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
+
     serve_manager = ServeManager()
     serve_manager.start(app_obj, host=host, port=port)
 
-    # Keep the main thread alive so the daemon thread survives.
+    time.sleep(1)
+    with _db_session(db_manager) as session:
+        service = ServiceModel(
+            service_name=workflow_name,
+            status="running",
+            host=host,
+            port=port,
+            pid=os.getpid(),
+            started_at=datetime.now(),
+        )
+        session.add(service)
+
+
     console.print(f"[green]Serve started[/green] {workflow_name} at http://{host}:{port}")
     console.print("Press Ctrl+C to stop.")
     try:
@@ -820,16 +1042,20 @@ def serve_stop(
                         check=False,
                     )
                 else:
-                    os.kill(service.pid, 15)
+                    try:
+                        os.killpg(os.getpgid(service.pid), signal.SIGTERM)
+                    except (ProcessLookupError, OSError):
+                        os.kill(service.pid, signal.SIGTERM)
             except Exception as exc:
                 console.print(f"[red]Error stopping process:[/red] {exc}")
                 raise typer.Exit(1)
 
         service.status = "stopped"
         service.stopped_at = datetime.now()
-        session.commit()
 
-    console.print(f"[green]Stopped serve[/green] for {workflow_name} (PID {service.pid})")
+        pid = service.pid
+
+    console.print(f"[green]Stopped serve[/green] for {workflow_name} (PID {pid})")
 
 
 @serve_app.command("status")
@@ -841,27 +1067,31 @@ def serve_status():
     with _db_session(db_manager) as session:
         services = session.query(ServiceModel).all()
 
-    if not services:
-        console.print("No serve processes found.")
-        return
+        if not services:
+            console.print("No serve processes found.")
+            return
 
-    table = Table(title="Serve Status")
-    table.add_column("Workflow", style="cyan")
-    table.add_column("Host:Port", style="magenta")
-    table.add_column("PID", style="green")
-    table.add_column("Status", style="yellow")
-    table.add_column("Running", style="blue")
+        table = Table(title="Serve Status")
+        table.add_column("Workflow", style="cyan")
+        table.add_column("Host:Port", style="magenta")
+        table.add_column("PID", style="green")
+        table.add_column("Status", style="yellow")
+        table.add_column("Running", style="blue")
 
-    for svc in services:
-        running = _is_process_running(svc.pid)
-        status = svc.status or "unknown"
-        table.add_row(
-            svc.service_name,
-            f"{svc.host}:{svc.port}",
-            str(svc.pid) if svc.pid else "N/A",
-            status,
-            "YES" if running else "NO",
-        )
+        for svc in services:
+            running = _is_process_running(svc.pid)
+            if not running and svc.status != "stopped":
+                svc.status = "stopped"
+                svc.stopped_at = datetime.now()
+            status = svc.status or "unknown"
+            table.add_row(
+                svc.service_name,
+                f"{svc.host}:{svc.port}",
+                str(svc.pid) if svc.pid else "N/A",
+                status,
+                "YES" if running else "NO",
+            )
+
 
     console.print(table)
 
@@ -894,13 +1124,20 @@ def trigger(
             triggered_by="user",
         )
 
+        env_manager = EnvManager()
+        env = env_manager.get_env(model.id)
+        if env is not None:
+            command = f"conda run -n {env.name} {model.command}"
+        else:
+            command = model.command
+
         context = ExecutionContext(
             workflow_id=model.id,
             workflow_name=model.workflow_name,
             workflow_type=model.workflow_type,
-            command=model.command,
+            command=command,
             working_dir=model.working_dir,
-            env_vars={"PANGFLOW_RUN_ID": run_id},
+            env_vars={"PANGFLOW_RUN_ID": run_id, "PANGFLOW_WORKFLOW_ID": model.id},
         )
 
         console.print(f"[blue]Triggering[/blue] {workflow_name}  Run ID: {run_id}")
@@ -954,7 +1191,10 @@ def logs(
         if node:
             entries = (
                 session.query(NodeLogModel)
-                .filter_by(workflow_id=wf.id, node_name=node)
+                .filter(
+                    ((NodeLogModel.workflow_id == wf.id) | (NodeLogModel.workflow_id == wf.workflow_name) | (NodeLogModel.workflow_name == wf.workflow_name)),
+                    NodeLogModel.node_name == node
+                )
                 .order_by(NodeLogModel.timestamp.desc())
                 .limit(limit)
                 .all()
@@ -1015,7 +1255,14 @@ def metrics(
         wf = _lookup_workflow(session, workflow_name)
         rows = (
             session.query(NodeLogModel)
-            .filter_by(workflow_id=wf.id, log_type="metric")
+            .filter(
+                NodeLogModel.log_type == "metric",
+                (
+                    (NodeLogModel.workflow_id == wf.id)
+                    | (NodeLogModel.workflow_id == wf.workflow_name)
+                    | (NodeLogModel.workflow_name == wf.workflow_name)
+                ),
+            )
             .order_by(NodeLogModel.timestamp.desc())
             .all()
         )
@@ -1059,7 +1306,11 @@ def lineage(
         wf = _lookup_workflow(session, workflow_name)
         artifacts = (
             session.query(ArtifactModel)
-            .filter_by(workflow_id=wf.id)
+            .filter(
+                (ArtifactModel.workflow_id == wf.id)
+                | (ArtifactModel.workflow_id == wf.workflow_name)
+                | (ArtifactModel.workflow_id == "")
+            )
             .all()
         )
         artifact_ids = {a.artifact_id for a in artifacts}
@@ -1111,6 +1362,13 @@ def model_list(
             query = query.filter_by(workflow_id=wf.id)
         artifacts = query.order_by(ArtifactModel.created_at.desc()).all()
 
+        from collections import OrderedDict
+        seen = OrderedDict()
+        for a in artifacts:
+            if a.name not in seen:
+                seen[a.name] = a
+        artifacts = list(seen.values())
+
         for art in artifacts:
             tags = json.loads(art.tags_json or "{}")
             wf_name = "-"
@@ -1151,10 +1409,25 @@ def model_promote(
 ):
     """Promote a model version to a new stage."""
     workspace = _get_workspace()
-    _init_db(workspace)
+    db_manager = _init_db(workspace)
     store = _model_store(workspace)
 
     artifact_id = version
+    # Support name:version syntax
+    if ":" in version and not _is_uuid(version):
+        name, ver = version.split(":", 1)
+        with _db_session(db_manager) as session:
+            art = (
+                session.query(ArtifactModel)
+                .filter_by(name=name, version=ver, artifact_type="model")
+                .order_by(ArtifactModel.created_at.desc())
+                .first()
+            )
+            if art is None:
+                console.print(f"[red]Artifact not found:[/red] {version}")
+                raise typer.Exit(1)
+            artifact_id = art.artifact_id
+
     try:
         store.promote_version(artifact_id, stage=to)
         console.print(f"[green]Promoted[/green] {artifact_id} → {to}")
@@ -1171,31 +1444,45 @@ def model_rollback(
     workspace = _get_workspace()
     db_manager = _init_db(workspace)
 
+    artifact_id = version
+    # Support name:version syntax
+    if ":" in version and not _is_uuid(version):
+        name, ver = version.split(":", 1)
+        with _db_session(db_manager) as session:
+            art = (
+                session.query(ArtifactModel)
+                .filter_by(name=name, version=ver, artifact_type="model")
+                .order_by(ArtifactModel.created_at.desc())
+                .first()
+            )
+            if art is None:
+                console.print(f"[red]Artifact not found:[/red] {version}")
+                raise typer.Exit(1)
+            artifact_id = art.artifact_id
+
     with _db_session(db_manager) as session:
-        artifact = session.query(ArtifactModel).filter_by(artifact_id=version).first()
+        artifact = session.query(ArtifactModel).filter_by(artifact_id=artifact_id).first()
         if artifact is None:
-            console.print(f"[red]Artifact not found:[/red] {version}")
+            console.print(f"[red]Artifact not found:[/red] {artifact_id}")
             raise typer.Exit(1)
 
         # Find previous version record
         prev = (
             session.query(ArtifactVersionModel)
-            .filter_by(artifact_id=version)
+            .filter_by(artifact_id=artifact_id)
             .order_by(ArtifactVersionModel.created_at.desc())
             .offset(1)
             .first()
         )
         if prev is None:
-            console.print("[yellow]No previous version to rollback to.[/yellow]")
-            raise typer.Exit(0)
-
-        prev_stage = prev.stage
+            prev_stage = "development"
+        else:
+            prev_stage = prev.stage
         tags = json.loads(artifact.tags_json or "{}")
         tags["stage"] = prev_stage
         artifact.tags_json = json.dumps(tags)
-        session.commit()
 
-    console.print(f"[green]Rolled back[/green] {version} to stage '{prev_stage}'")
+    console.print(f"[green]Rolled back[/green] {artifact_id} to stage '{prev_stage}'")
 
 
 # --------------------------------------------------------------------------- #

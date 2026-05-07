@@ -22,6 +22,8 @@ def process_data(data: list) -> list:
     pf.log(f"处理数据: {data}", level="INFO")
     result = [x ** 2 for x in data]
     pf.log_metric("sum_squares", float(sum(result)))
+    # Save intermediate artifact so lineage can trace the data flow
+    pf.save_model("processed_data", result, metadata={"stage": "intermediate"})
     return result
 
 

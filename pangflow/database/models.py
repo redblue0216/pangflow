@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-PangFlow v0.2.7 – SQLAlchemy ORM models.
+PangFlow v0.2.11 – SQLAlchemy ORM models.
 
 Covers workflows, execution logs, artifacts, lineage, features, environments,
 services, traces and node-level logs.
@@ -88,7 +88,7 @@ class ExecutionLogModel(Base):
     __tablename__ = "execution_logs"
 
     id = Column(String(36), primary_key=True, default=_uuid)
-    workflow_id = Column(String(36), ForeignKey("workflows.id"), nullable=False, index=True)
+    workflow_id = Column(String(36), ForeignKey("workflows.id"), nullable=True, index=True)
     run_id = Column(String(36), nullable=False, index=True)
     execution_type = Column(String(20), nullable=False)
     status = Column(String(20), nullable=False)
@@ -129,7 +129,7 @@ class ArtifactModel(Base):
     __tablename__ = "artifacts"
 
     artifact_id = Column(String(36), primary_key=True, default=_uuid)
-    workflow_id = Column(String(36), ForeignKey("workflows.id"), nullable=False, index=True)
+    workflow_id = Column(String(36), ForeignKey("workflows.id"), nullable=True, index=True)
     node_id = Column(String(36), nullable=False, index=True)
     artifact_type = Column(String(50), nullable=False)
     name = Column(String(255), nullable=False, index=True)

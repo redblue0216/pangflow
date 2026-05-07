@@ -209,6 +209,13 @@ class WorkflowServe(BaseModel):
     model_config = ConfigDict(extra='allow')
 
 
+class ScheduleConfig(BaseModel):
+    '''Schedule configuration section.'''
+    type: str = "cron"
+    expression: Optional[str] = None
+    model_config = ConfigDict(extra='allow')
+
+
 class NodeConfig(BaseModel):
     '''Configuration for a workflow node.'''
     name: str = ""
@@ -218,8 +225,9 @@ class NodeConfig(BaseModel):
 class WorkflowConfig(BaseModel):
     '''Root workflow configuration model.'''
     name: Optional[str] = None
-    version: str = "0.2.7"
+    version: str = "0.2.11"
     description: Optional[str] = None
+    schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)
     env: WorkflowEnv = Field(default_factory=WorkflowEnv)
     storage: WorkflowStorage = Field(default_factory=WorkflowStorage)
     log: WorkflowLog = Field(default_factory=WorkflowLog)
@@ -323,7 +331,7 @@ class ConfigLoader:
         '''Build global default configuration.'''
         return {
             "name": None,
-            "version": "0.2.7",
+            "version": "0.2.11",
             "env": {},
             "storage": {"backend": "local", "path": "./data"},
             "log": {"level": "INFO", "path": None, "format": None},

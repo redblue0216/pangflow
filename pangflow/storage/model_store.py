@@ -22,7 +22,12 @@ class ModelStore:
         self.meta_store = meta_store
         self._subject = get_subject()
 
-    def save_model(self, model: Any, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def save_model(
+        self,
+        model: Any,
+        metadata: Optional[Dict[str, Any]] = None,
+        upstream_artifact_ids: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
         """Serialize *model*, persist it, register metadata, and return handles."""
         metadata = metadata or {}
         name = metadata.get("name", "model")
@@ -51,6 +56,9 @@ class ModelStore:
             "artifact_id": artifact_id,
             "name": name,
             "version": version,
+            "workflow_id": metadata.get("workflow_id"),
+            "node_id": metadata.get("node_id"),
+            "upstream_artifact_ids": upstream_artifact_ids or [],
         })
         return {"artifact_id": artifact_id, "storage_key": storage_key, "checksum": checksum}
 
@@ -83,6 +91,7 @@ class ModelStore:
         promoted_by: Optional[str] = None,
     ) -> None:
         """Promote an artifact to a new *stage* (e.g. ``staging``, ``production``)."""
+        import json
         db = get_db_manager()
         artifact = self.meta_store.get_artifact(artifact_id)
         if artifact is None:
@@ -99,6 +108,15 @@ class ModelStore:
                 stage=stage,
             )
             session.add(version)
+
+            # Also update the artifact's tags so model list shows the current stage
+            from pangflow.database.models import ArtifactModel
+
+            art_model = session.query(ArtifactModel).filter_by(artifact_id=artifact_id).first()
+            if art_model:
+                tags = json.loads(art_model.tags_json or "{}")
+                tags["stage"] = stage
+                art_model.tags_json = json.dumps(tags)
 
         self._subject.publish("MODEL_PROMOTED", {
             "artifact_id": artifact_id,
@@ -144,7 +162,12 @@ def _default_store() -> ModelStore:
     return _DEFAULT_STORE
 
 
-def save_model(name: str, model: Any, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def save_model(
+    name: str,
+    model: Any,
+    metadata: Optional[Dict[str, Any]] = None,
+    upstream_artifact_ids: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     """Save *model* under *name* using the default ModelStore.
 
     Parameters
@@ -155,10 +178,14 @@ def save_model(name: str, model: Any, metadata: Optional[Dict[str, Any]] = None)
         Pickle-serializable Python object.
     metadata : dict, optional
         Extra metadata such as ``accuracy``, ``version``, ``tags``.
+    upstream_artifact_ids : list, optional
+        Artifact IDs that this model depends on (for lineage tracking).
     """
     meta = dict(metadata or {})
     meta["name"] = name
-    return _default_store().save_model(model, metadata=meta)
+    return _default_store().save_model(
+        model, metadata=meta, upstream_artifact_ids=upstream_artifact_ids
+    )
 
 
 def load_model(name: str, stage: Optional[str] = None) -> Any:

@@ -3,8 +3,12 @@
 Environment manager singleton backed by SQLite caching.
 """
 
+import importlib.util
 import json
 import logging
+import pathlib
+import subprocess
+import sys
 from typing import Dict, List, Optional
 
 from pangflow.database.connection import get_db_manager
@@ -31,17 +35,45 @@ class EnvManager:
     # --------------------------------------------------------------------- #
 
     def get_env(self, workflow_id: str) -> Optional[CondaEnv]:
-        """Retrieve the environment linked to *workflow_id* (cache → DB)."""
+        """Retrieve the environment linked to *workflow_id* (cache → DB).
+
+        Falls back to looking up by workflow_name for backwards compatibility
+        with environments created before v0.2.10.
+        """
         if workflow_id in self._cache:
             return self._cache[workflow_id]
 
         db_manager = get_db_manager()
         with db_manager.get_session() as session:
+            # Try exact workflow_id match first
             model = (
                 session.query(EnvironmentModel)
                 .filter_by(workflow_id=workflow_id)
                 .first()
             )
+            if model is None:
+                # Fallback: try matching by workflow_name (old records)
+                from pangflow.database.models import WorkflowModel
+
+                wf = (
+                    session.query(WorkflowModel)
+                    .filter_by(workflow_name=workflow_id)
+                    .first()
+                )
+                if wf:
+                    model = (
+                        session.query(EnvironmentModel)
+                        .filter_by(workflow_id=wf.workflow_name)
+                        .first()
+                    )
+                    if model is None:
+                        # Try one more fallback: old envs stored UUID but query came as name
+                        model = (
+                            session.query(EnvironmentModel)
+                            .filter_by(workflow_id=wf.id)
+                            .first()
+                        )
+
             if model is None:
                 logger.debug("No environment found for workflow %s", workflow_id)
                 return None
@@ -81,6 +113,25 @@ class EnvManager:
             if not env.create():
                 logger.error("Failed to create conda environment '%s'", env_spec.name)
                 return None
+
+            # Install pangflow itself into the new environment so workflows can import it
+            pangflow_spec = importlib.util.find_spec("pangflow")
+            if pangflow_spec and pangflow_spec.origin:
+                pangflow_pkg_root = pathlib.Path(pangflow_spec.origin).parent.parent
+                # Try editable install first
+                pip_install_cmd = [
+                    "conda", "run", "-n", env_spec.name,
+                    sys.executable, "-m", "pip", "install", "-e", str(pangflow_pkg_root)
+                ]
+                try:
+                    subprocess.run(pip_install_cmd, check=True, capture_output=True)
+                except subprocess.CalledProcessError:
+                    # Fallback to regular install
+                    pip_install_cmd = [
+                        "conda", "run", "-n", env_spec.name,
+                        sys.executable, "-m", "pip", "install", str(pangflow_pkg_root)
+                    ]
+                    subprocess.run(pip_install_cmd, check=False, capture_output=True)
 
             model = EnvironmentModel(
                 workflow_id=workflow_id,

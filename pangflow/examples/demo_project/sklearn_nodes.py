@@ -24,6 +24,8 @@ def load_iris_data() -> dict:
     }
     pf.log_metric("total_samples", float(len(data["y"])))
     pf.log_metric("n_features", float(len(data["feature_names"])))
+    # Save raw dataset artifact so lineage can trace the data flow
+    pf.save_model("iris_dataset", data, metadata={"stage": "raw"})
     return data
 
 

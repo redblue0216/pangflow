@@ -22,7 +22,7 @@ class MetaStore:
         db = get_db_manager()
         with db.get_session() as session:
             artifact = ArtifactModel(
-                workflow_id=artifact_data.get("workflow_id", ""),
+                workflow_id=artifact_data.get("workflow_id") or None,
                 node_id=artifact_data.get("node_id", ""),
                 artifact_type=artifact_data.get("artifact_type", "generic"),
                 name=artifact_data.get("name", "untitled"),

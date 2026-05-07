@@ -12,17 +12,14 @@ from typing import Any, Callable, List
 
 try:
     from fastapi import FastAPI, Request
-    from fastapi.responses import JSONResponse
-    from pydantic import BaseModel, create_model
+    from pydantic import BaseModel
 
     FASTAPI_AVAILABLE = True
 except ImportError:  # pragma: no cover
     FASTAPI_AVAILABLE = False
     FastAPI = None
     Request = None
-    JSONResponse = None
     BaseModel = None
-    create_model = None
 
 from pangflow.orchestration.registry import ServeMetadata
 
@@ -63,25 +60,30 @@ class ServeCompiler:
     def _add_route(self, app: FastAPI, ep: ServeMetadata) -> None:
         sig = inspect.signature(ep.func_ref)
 
-        # Build Pydantic request model from signature.
-        fields: dict = {}
-        for name, param in sig.parameters.items():
-            ann = param.annotation if param.annotation is not inspect.Parameter.empty else Any
-            default = param.default if param.default is not inspect.Parameter.empty else ...
-            fields[name] = (ann, default)
-
-        RequestModel = create_model(f"{ep.name}_Request", **fields)
-
         # Determine response model (best-effort).
         return_annotation = sig.return_annotation if sig.return_annotation is not inspect.Parameter.empty else Any
 
-        async def _handler(data: RequestModel):  # type: ignore[valid-type]
-            # Pydantic v2 compat
-            if hasattr(data, "model_dump"):
-                payload = data.model_dump()
-            else:
-                payload = data.dict()
-            return ep.func_ref(**payload)
+        # Read raw JSON body and pass to the decorated function.
+        sig = inspect.signature(ep.func_ref)
+        params = list(sig.parameters.values())
+        if (
+            params
+            and len(params) == 1
+            and params[0].annotation is not inspect.Parameter.empty
+            and isinstance(params[0].annotation, type)
+            and issubclass(params[0].annotation, BaseModel)
+        ):
+            RequestModel = params[0].annotation
+            if hasattr(RequestModel, "model_rebuild"):
+                RequestModel.model_rebuild()
+            async def _handler(request: Request, _ep=ep, _Model=RequestModel):
+                body = await request.json()
+                data = _Model(**body)
+                return _ep.func_ref(data)
+        else:
+            async def _handler(request: Request, _ep=ep):
+                body = await request.json()
+                return _ep.func_ref(**body)
 
         app.add_api_route(
             path=ep.endpoint,
