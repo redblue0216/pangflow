@@ -225,7 +225,7 @@ class NodeConfig(BaseModel):
 class WorkflowConfig(BaseModel):
     '''Root workflow configuration model.'''
     name: Optional[str] = None
-    version: str = "0.2.11"
+    version: str = "0.2.12"
     description: Optional[str] = None
     schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)
     env: WorkflowEnv = Field(default_factory=WorkflowEnv)
@@ -331,7 +331,7 @@ class ConfigLoader:
         '''Build global default configuration.'''
         return {
             "name": None,
-            "version": "0.2.11",
+            "version": "0.2.12",
             "env": {},
             "storage": {"backend": "local", "path": "./data"},
             "log": {"level": "INFO", "path": None, "format": None},

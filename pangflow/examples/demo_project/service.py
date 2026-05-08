@@ -1,4 +1,4 @@
-"""PangFlow v0.2.11 示例 HTTP 服务 —— 暴露推理端点
+"""PangFlow v0.2.12 示例 HTTP 服务 —— 暴露推理端点
 
 这个文件演示了如何使用 @pf.serve 装饰器将算法函数暴露为 HTTP API，
 以及如何使用 pf.load_model() 加载已注册的模型工件进行推理。

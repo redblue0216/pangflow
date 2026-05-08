@@ -390,6 +390,16 @@ class FlowCompiler:
         import subprocess, sys, tempfile, cloudpickle, os
         env_name = getattr(env, "name", str(env))
         logger.info("Running node in conda env: %s", env_name)
+        # Validate that the conda environment actually exists before attempting to run
+        check = subprocess.run(
+            ["conda", "run", "-n", env_name, "python", "--version"],
+            capture_output=True, text=True, check=False
+        )
+        if check.returncode != 0:
+            raise RuntimeError(
+                f"Conda environment '{env_name}' is not available. "
+                f"Please create it first with: pangflowctl env create --workflow <name>"
+            )
         
         # Serialize function + args via cloudpickle
         with tempfile.NamedTemporaryFile(mode="wb", suffix=".pkl", delete=False) as fh:

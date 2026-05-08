@@ -4,6 +4,7 @@ ModelStore – saves/loads model objects with versioning and promotion.
 """
 
 import hashlib
+import os
 import pickle
 from typing import Any, Dict, List, Optional
 
@@ -191,6 +192,9 @@ def save_model(
 def load_model(name: str, stage: Optional[str] = None) -> Any:
     """Load the latest model called *name*, optionally filtered by *stage*.
 
+    If *stage* is omitted, the environment variable ``PANGFLOW_DEFAULT_STAGE``
+    is consulted (useful in serve contexts where the deployment pins a stage).
+
     Parameters
     ----------
     name : str
@@ -198,4 +202,6 @@ def load_model(name: str, stage: Optional[str] = None) -> Any:
     stage : str, optional
         Promotion stage filter (e.g. ``"production"``).
     """
+    if stage is None:
+        stage = os.environ.get("PANGFLOW_DEFAULT_STAGE")
     return _default_store().load_model(name, stage=stage)

@@ -1,10 +1,10 @@
-# PangFlow v0.2.11 标准工作流配置文件（零外部依赖）
+# PangFlow v0.2.12 标准工作流配置文件（零外部依赖）
 # 声明式配置所有 OPS 行为，包括环境、存储、日志、服务、节点参数等
 
 [workflow]
 name = "demo-workflow"
 version = "1.0.0"
-description = "PangFlow v0.2.11 标准演示工作流 —— 纯 Python 标准库"
+description = "PangFlow v0.2.12 标准演示工作流 —— 纯 Python 标准库"
 
 [workflow.schedule]
 type = "cron"

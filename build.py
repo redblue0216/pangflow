@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PangFlow v0.2.6 构建脚本：构建前端 + 打包 Python
+"""PangFlow 构建脚本：构建前端 + 打包 Python
 
 用法：
     python build.py                  # 构建前端 + Python 打包
@@ -15,11 +15,23 @@
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+
+def _read_version() -> str:
+    """Read version from pyproject.toml so build.py never goes stale."""
+    pyproject = Path(__file__).parent / "pyproject.toml"
+    text = pyproject.read_text(encoding="utf-8")
+    m = re.search(r'^version\s*=\s*"([^"]+)"', text, re.M)
+    return m.group(1) if m else "unknown"
+
+
+VERSION = _read_version()
 
 PROJECT_ROOT = Path(__file__).parent.resolve()
 WEBUI_DIR = PROJECT_ROOT / "webui"
@@ -102,10 +114,27 @@ def clean_build_artifacts(verbose: bool) -> None:
     print("  ✅ 清理完成")
 
 
+def _inject_version_into_webui() -> None:
+    """Sync version into webui package.json and index.html before building."""
+    pkg = WEBUI_DIR / "package.json"
+    if pkg.exists():
+        text = pkg.read_text(encoding="utf-8")
+        text = re.sub(r'"version":\s*"[^"]+"', f'"version": "{VERSION}"', text)
+        pkg.write_text(text, encoding="utf-8")
+
+    idx = WEBUI_DIR / "index.html"
+    if idx.exists():
+        text = idx.read_text(encoding="utf-8")
+        text = re.sub(r'<title>.*?</title>', f'<title>PangFlow {VERSION}</title>', text)
+        idx.write_text(text, encoding="utf-8")
+
+
 def build_frontend(verbose: bool) -> None:
     """构建前端"""
     print("【2/4】构建前端...")
     print(f"  工作目录: {WEBUI_DIR}")
+
+    _inject_version_into_webui()
 
     # npm install（如果 node_modules 不存在或 package.json 更新了）
     if not (WEBUI_DIR / "node_modules").exists():
@@ -177,9 +206,9 @@ def install_package(verbose: bool) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="PangFlow v0.2.6 构建脚本：构建前端 + 打包 Python",
+        description=f"PangFlow {VERSION} 构建脚本：构建前端 + 打包 Python",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
+        epilog=f"""
 示例:
   python build.py                  # 构建前端 + 打包
   python build.py --install        # 构建 + 打包 + 安装
@@ -215,7 +244,7 @@ def main() -> None:
     args = parser.parse_args()
 
     print(f"\n{'='*60}")
-    print("  PangFlow v0.2.6 构建脚本")
+    print(f"  PangFlow {VERSION} 构建脚本")
     print(f"{'='*60}\n")
 
     start_time = time.time()

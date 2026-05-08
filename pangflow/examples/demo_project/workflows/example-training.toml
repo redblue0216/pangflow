@@ -1,0 +1,30 @@
+# pangflow Workflow Configuration
+# This is a trigger-based workflow template (for training)
+
+# Workflow name (required)
+name = "my-training-workflow"
+
+# Algorithm package name (required)
+# Options: PangTS, PangFT
+package = "PangTS"
+
+# Workflow type (required)
+# Options: trigger, scheduled
+type = "trigger"
+
+# Description (optional)
+description = "My training workflow description"
+
+# Command to execute (required)
+# For Windows demo, use echo commands
+command = "echo Training workflow: my-training-workflow"
+
+# Working directory (optional)
+# working_dir = "."
+
+# Environment variables (optional)
+# [env]
+# MY_VAR = "value"
+
+# Timeout in seconds (optional)
+# timeout = 3600

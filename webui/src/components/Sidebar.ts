@@ -1,8 +1,10 @@
+import { api } from '../api/client';
+
 const items = [
   { hash: '#dashboard', label: 'Dashboard', icon: '\uD83D\uDCCA' },
   { hash: '#workflows', label: 'Workflows', icon: '\u2699\uFE0F' },
   { hash: '#executions', label: 'Executions', icon: '\uD83D\uDCDD' },
-  { hash: '#models', label: 'Models', icon: '\uD83D\uDCE6' },
+  { hash: '#artifacts', label: 'Artifacts', icon: '\uD83D\uDCE6' },
   { hash: '#lineage', label: 'Lineage', icon: '\uD83D\uDD17' },
   { hash: '#settings', label: 'Settings', icon: '\u2699\uFE0F' },
 ];
@@ -14,7 +16,7 @@ export function renderSidebar(container: HTMLElement): void {
     <aside class="w-64 bg-slate-900 text-white flex flex-col h-screen fixed left-0 top-0 z-20">
       <div class="p-6 border-b border-slate-700">
         <h1 class="text-xl font-bold tracking-wide">PangFlow</h1>
-        <span class="text-xs text-slate-400">v0.2.6</span>
+        <span id="sidebar-version" class="text-xs text-slate-400">...</span>
       </div>
       <nav class="flex-1 overflow-y-auto py-4">
         ${items.map(item => `
@@ -30,4 +32,15 @@ export function renderSidebar(container: HTMLElement): void {
       </div>
     </aside>
   `;
+
+  // Fetch version dynamically so it never goes stale
+  api.getSettings().then(settings => {
+    const el = document.getElementById('sidebar-version');
+    if (el && settings.version) {
+      el.textContent = `v${settings.version}`;
+    }
+  }).catch(() => {
+    const el = document.getElementById('sidebar-version');
+    if (el) el.textContent = '';
+  });
 }

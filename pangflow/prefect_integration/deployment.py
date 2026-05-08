@@ -98,6 +98,7 @@ import os
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 ### Internal package
@@ -177,7 +178,8 @@ class DeploymentManager:
 
     def _create_flow_file(self, workflow_state: WorkflowState, flow_file_path: Path, 
                           schedule_cron: Optional[str] = None, 
-                          schedule_interval: Optional[int] = None) -> str:
+                          schedule_interval: Optional[int] = None,
+                          workspace_path: Optional[Path] = None) -> str:
         '''Method Function:
         
         Create a temporary Python file containing the flow definition with serve.
@@ -207,6 +209,9 @@ class DeploymentManager:
             schedule_config = f'    interval={schedule_interval},\n'
         elif workflow_state.workflow_type == WorkflowType.SCHEDULED:
             schedule_config = '    interval=3600,\n'  # Default 1 hour
+        # Embed workspace path so the flow file can locate the DB even when
+        # running in a subprocess with a different cwd.
+        ws_path_str = str(workspace_path).replace("\\", "\\\\") if workspace_path else ""
         lines = [
             '"""',
             f'Auto-generated Prefect flow for pangflow workflow: {workflow_state.workflow_name}',
@@ -214,12 +219,51 @@ class DeploymentManager:
             'import subprocess',
             'import os',
             'import sys',
+            'import uuid',
+            'from datetime import datetime',
             'from typing import Optional, Dict, Any',
             'from prefect import flow, task, get_run_logger, serve',
             '',
             f'WORKFLOW_ID = "{workflow_state.workflow_id}"',
             f'WORKFLOW_NAME = "{workflow_state.workflow_name}"',
             f'COMMAND = "{escaped_command}"',
+            f'WORKSPACE_PATH = "{ws_path_str}"',
+            '',
+            '',
+            'def _record_execution(status: str, return_code: int = 0, stdout: str = "", stderr: str = "", run_id: str = "") -> None:',
+            '    """Write or update an execution log in the pangflow SQLite database."""',
+            '    try:',
+            '        from pangflow.database.connection import initialize_database',
+            '        from pangflow.database.models import ExecutionLogModel',
+            '        from pathlib import Path',
+            '        ws = Path(WORKSPACE_PATH) if WORKSPACE_PATH else None',
+            '        db_url = f"sqlite:///{ws / \"pangflow.db\"}" if ws else None',
+            '        db = initialize_database(db_url)',
+            '        with db.get_session() as session:',
+            '            existing = session.query(ExecutionLogModel).filter_by(run_id=run_id).first()',
+            '            if existing is not None:',
+            '                existing.status = status',
+            '                existing.return_code = return_code',
+            '                existing.stdout = stdout',
+            '                existing.stderr = stderr',
+            '                if status != "running":',
+            '                    existing.completed_at = datetime.now()',
+            '            else:',
+            '                log = ExecutionLogModel(',
+            '                    workflow_id=WORKFLOW_ID,',
+            '                    run_id=run_id or str(uuid.uuid4()),',
+            '                    execution_type="scheduled" if not os.environ.get("PANGFLOW_RUN_ID") else "trigger",',
+            '                    status=status,',
+            '                    return_code=return_code,',
+            '                    stdout=stdout,',
+            '                    stderr=stderr,',
+            '                    triggered_by="prefect",',
+            '                    started_at=datetime.now(),',
+            '                    completed_at=datetime.now() if status != "running" else None,',
+            '                )',
+            '                session.add(log)',
+            '    except Exception:',
+            '        pass  # Best-effort logging',
             '',
             '',
             '@task(name=f"{WORKFLOW_NAME}_execute")',
@@ -229,8 +273,11 @@ class DeploymentManager:
             '    env_vars: Optional[Dict[str, str]] = None',
             ') -> Dict[str, Any]:',
             '    """Execute the CLI command as a Prefect task."""',
+            '    run_id = os.environ.get("PANGFLOW_RUN_ID", str(uuid.uuid4()))',
             '    run_logger = get_run_logger()',
             '    run_logger.info(f"Executing command: {cmd}")',
+            '    ',
+            '    _record_execution("running", run_id=run_id)',
             '    ',
             '    # Prepare environment',
             '    env = os.environ.copy()',
@@ -257,8 +304,10 @@ class DeploymentManager:
             '            run_logger.warning("STDERR: " + result.stderr)',
             '    ',
             '    if result.returncode != 0:',
+            '        _record_execution("failed", return_code=result.returncode, stdout=result.stdout, stderr=result.stderr, run_id=run_id)',
             '        raise RuntimeError(f"Command failed with code {result.returncode}: {result.stderr}")',
             '    ',
+            '    _record_execution("success", return_code=0, stdout=result.stdout, stderr=result.stderr, run_id=run_id)',
             '    return {',
             '        "return_code": result.returncode,',
             '        "stdout": result.stdout,',
@@ -336,13 +385,16 @@ class DeploymentManager:
                 if not cron and not interval:
                     interval = 3600  # 1 hour in seconds
             # Create a flow file with serve() in the current working directory
+            from pangflow.utils.workspace import find_workspace
+            ws = find_workspace()
             flow_file_name = f"pangflow_flow_{workflow_state.workflow_id[:8]}.py"
             flow_file_path = Path.cwd() / flow_file_name
             flow_func_name = self._create_flow_file(
                 workflow_state, 
                 flow_file_path,
                 schedule_cron=cron,
-                schedule_interval=interval
+                schedule_interval=interval,
+                workspace_path=ws,
             )
             # Store deployment info
             deployment_info = {
@@ -383,6 +435,9 @@ class DeploymentManager:
         Prefect serve process. Handles platform-specific process creation
         flags for proper background execution.
         
+        stdout/stderr are redirected to a log file to prevent PIPE buffer
+        exhaustion which causes the serve process to crash silently.
+        
         :parameters:
             - flow_file_path (Path) - Path to the flow file
             - workflow_name (str) - Name of the workflow
@@ -393,31 +448,39 @@ class DeploymentManager:
 
         try:
             logger.info(f"Starting serve process for {workflow_name}")
-            # Start the serve process in the background
-            # Use creationflags on Windows to detach the process
+            # Redirect stdout/stderr to a log file to avoid PIPE buffer exhaustion
+            log_dir = Path.cwd() / "logs"
+            log_dir.mkdir(exist_ok=True)
+            log_file = log_dir / f"{workflow_name}_serve.log"
+            log_fp = open(log_file, "a", encoding="utf-8")
+            log_fp.write(f"\n--- Serve started at {datetime.now().isoformat()} ---\n")
+            log_fp.flush()
+
             if sys.platform == "win32":
                 process = subprocess.Popen(
                     [sys.executable, str(flow_file_path)],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    stdout=log_fp,
+                    stderr=subprocess.STDOUT,
                     creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
                 )
             else:
                 process = subprocess.Popen(
                     [sys.executable, str(flow_file_path)],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    stdout=log_fp,
+                    stderr=subprocess.STDOUT,
                     start_new_session=True
                 )
             # Wait a moment to see if the process starts successfully
             time.sleep(2)
             # Check if process is still running
             if process.poll() is None:
-                logger.info(f"Serve process started for {workflow_name} (PID: {process.pid})")
+                logger.info(f"Serve process started for {workflow_name} (PID: {process.pid}, log: {log_file})")
                 return process
             else:
-                stdout, stderr = process.communicate()
-                logger.error(f"Serve process failed to start: {stderr.decode()}")
+                log_fp.write(f"Serve process exited early with code {process.returncode}\n")
+                log_fp.flush()
+                log_fp.close()
+                logger.error(f"Serve process failed to start; see {log_file}")
                 return None
         except Exception as e:
             logger.exception(f"Failed to start serve process: {e}")

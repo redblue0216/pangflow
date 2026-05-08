@@ -19,7 +19,7 @@ def create_web_app() -> FastAPI:
     app = FastAPI(
         title="PangFlow Web",
         description="PangFlow workflow engine web backend",
-        version="0.2.11",
+        version="0.2.12",
     )
 
     # Include API router

@@ -2,6 +2,7 @@ import { initLayout } from './components/Layout';
 import { renderDashboard } from './pages/Dashboard';
 import { renderWorkflows } from './pages/Workflows';
 import { renderExecutions } from './pages/Executions';
+import { renderArtifacts } from './pages/Artifacts';
 import { renderModels } from './pages/Models';
 import { renderLineage } from './pages/Lineage';
 import { renderSettings } from './pages/Settings';
@@ -11,6 +12,7 @@ const routes: Record<string, { title: string; render: (container: HTMLElement) =
   '#dashboard': { title: 'Dashboard', render: renderDashboard },
   '#workflows': { title: 'Workflows', render: renderWorkflows },
   '#executions': { title: 'Executions', render: renderExecutions },
+  '#artifacts': { title: 'Artifacts', render: renderArtifacts },
   '#models': { title: 'Models', render: renderModels },
   '#lineage': { title: 'Lineage', render: renderLineage },
   '#settings': { title: 'Settings', render: renderSettings },

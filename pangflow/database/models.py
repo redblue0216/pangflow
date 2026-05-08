@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-PangFlow v0.2.11 – SQLAlchemy ORM models.
+PangFlow v0.2.12 – SQLAlchemy ORM models.
 
 Covers workflows, execution logs, artifacts, lineage, features, environments,
 services, traces and node-level logs.

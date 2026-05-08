@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""PangFlow v0.2.11 CLI – pangflowctl.
+"""PangFlow v0.2.12 CLI – pangflowctl.
 
 A modern typer-based CLI for workflow orchestration, environment management,
 serve lifecycle, model promotion and lineage inspection.
@@ -59,7 +59,7 @@ logger = logging.getLogger(__name__)
 console = Console()
 app = typer.Typer(
     name="pangflowctl",
-    help="PangFlow v0.2.11 – Algorithm OPS orchestration CLI",
+    help="PangFlow v0.2.12 – Algorithm OPS orchestration CLI",
     no_args_is_help=True,
 )
 
@@ -447,6 +447,7 @@ def env_list():
 @app.command()
 def register(
     toml_file: str = typer.Argument(..., help="Path to workflow TOML file"),
+    name: Optional[str] = typer.Option(None, "--name", "-n", help="Override workflow name from TOML"),
 ):
     """Register a workflow from a TOML file."""
     workspace = _get_workspace()
@@ -474,7 +475,7 @@ def register(
             return [_serialize(item) for item in v]
         return v
 
-    wf_name = cfg.name or toml_path.stem
+    wf_name = name or cfg.name or toml_path.stem
     # Auto-infer command if not explicitly provided in TOML
     command = ""
     if toml_path.with_suffix(".py").exists():
@@ -518,6 +519,8 @@ def register(
             existing.updated_at = datetime.now()
             console.print(f"[green]Updated workflow[/green] {wf_name}")
             console.print(f"  ID:   {existing.id}")
+            if name and name != (cfg.name or toml_path.stem):
+                console.print(f"  [yellow]Note:[/yellow] Name overridden by --name from '{cfg.name or toml_path.stem}' to '{name}'")
         else:
             model = repo.create(workflow_state)
             console.print(f"[green]Registered workflow[/green] {wf_name}")
@@ -647,32 +650,42 @@ def deployment_serve(
         # Start serve process
         try:
             import subprocess, sys
+            from datetime import datetime
+            log_dir = workspace.workspace_path / "logs"
+            log_dir.mkdir(exist_ok=True)
+            log_file = log_dir / f"{workflow_name}_serve.log"
+            log_fp = open(log_file, "a", encoding="utf-8")
+            log_fp.write(f"\n--- Prefect serve started at {datetime.now().isoformat()} ---\n")
+            log_fp.flush()
+
             if sys.platform == "win32":
                 process = subprocess.Popen(
                     [sys.executable, str(flow_file)],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    stdout=log_fp,
+                    stderr=subprocess.STDOUT,
                     creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
                 )
             else:
                 process = subprocess.Popen(
                     [sys.executable, str(flow_file)],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    stdout=log_fp,
+                    stderr=subprocess.STDOUT,
                     start_new_session=True
                 )
             import time
             time.sleep(2)
             if process.poll() is not None:
-                stdout, stderr = process.communicate()
-                console.print(f"[red]Serve process failed to start:[/red] {stderr.decode()}")
+                log_fp.write(f"Serve process exited early with code {process.returncode}\n")
+                log_fp.flush()
+                log_fp.close()
+                console.print(f"[red]Serve process failed to start; see {log_file}[/red]")
                 raise typer.Exit(1)
 
             model.prefect_serve_pid = process.pid
             model.prefect_serve_status = "running"
             model.updated_at = datetime.now()
 
-            console.print(f"[green]Started Prefect serve[/green] for {workflow_name} (PID: {process.pid})")
+            console.print(f"[green]Started Prefect serve[/green] for {workflow_name} (PID: {process.pid}, log: {log_file})")
         except Exception as exc:
             console.print(f"[red]Failed to start serve:[/red] {exc}")
             raise typer.Exit(1)
@@ -903,6 +916,7 @@ def serve_start(
             f"command = {command!r}",
             f"working_dir = {working_dir!r}",
             f"os.environ.setdefault('PANGFLOW_WORKFLOW_ID', {model_id!r})",
+            "os.environ.setdefault('PANGFLOW_DEFAULT_STAGE', 'production')",
             "",
             "@app.post('/trigger')",
             "def trigger():",
@@ -986,6 +1000,7 @@ def serve_start(
     def trigger():
         env = os.environ.copy()
         env.setdefault("PANGFLOW_WORKFLOW_ID", model.id)
+        env.setdefault("PANGFLOW_DEFAULT_STAGE", "production")
         result = subprocess.run(command, shell=True, capture_output=True, text=True, cwd=working_dir, env=env)
         return {"returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
 
@@ -1181,7 +1196,7 @@ def logs(
     node: Optional[str] = typer.Option(None, "--node", help="Filter by node name"),
     limit: int = typer.Option(50, "--limit", "-n", help="Maximum log entries"),
 ):
-    """Show execution logs for a workflow."""
+    """Show execution logs and node-level logs for a workflow."""
     workspace = _get_workspace()
     db_manager = _init_db(workspace)
 
@@ -1211,20 +1226,31 @@ def logs(
                 ts = entry.timestamp.strftime("%Y-%m-%d %H:%M:%S") if entry.timestamp else "N/A"
                 table.add_row(ts, entry.level or "-", entry.message or "-")
             console.print(table)
-        else:
-            log_repo = ExecutionLogRepository(session)
-            entries = log_repo.list_by_workflow(wf.id, limit=limit)
-            if not entries:
-                console.print(f"No execution logs found for {workflow_name}")
-                return
+            return
 
-            table = Table(title=f"Execution Logs – {workflow_name}")
+        # Show both execution logs and node-level logs
+        log_repo = ExecutionLogRepository(session)
+        exec_entries = log_repo.list_by_workflow(wf.id, limit=limit)
+        node_entries = (
+            session.query(NodeLogModel)
+            .filter(
+                (NodeLogModel.workflow_id == wf.id)
+                | (NodeLogModel.workflow_id == wf.workflow_name)
+                | (NodeLogModel.workflow_name == wf.workflow_name)
+            )
+            .order_by(NodeLogModel.timestamp.desc())
+            .limit(limit)
+            .all()
+        )
+
+        if exec_entries:
+            console.print(f"\n[bold]Execution Logs – {workflow_name}[/bold]")
+            table = Table()
             table.add_column("Run ID", style="cyan")
             table.add_column("Status", style="magenta")
             table.add_column("Started", style="green")
             table.add_column("Duration", style="yellow")
-
-            for entry in entries:
+            for entry in exec_entries:
                 started = (
                     entry.started_at.strftime("%Y-%m-%d %H:%M")
                     if entry.started_at else "N/A"
@@ -1234,8 +1260,27 @@ def logs(
                 else:
                     duration = "N/A"
                 table.add_row(entry.run_id[:18], entry.status, started, duration)
-
             console.print(table)
+
+        if node_entries:
+            console.print(f"\n[bold]Node Logs – {workflow_name}[/bold]")
+            table = Table()
+            table.add_column("Time", style="cyan")
+            table.add_column("Node", style="magenta")
+            table.add_column("Level", style="green")
+            table.add_column("Message", style="yellow")
+            for entry in node_entries:
+                ts = entry.timestamp.strftime("%Y-%m-%d %H:%M:%S") if entry.timestamp else "N/A"
+                table.add_row(
+                    ts,
+                    entry.node_name or "-",
+                    entry.level or "-",
+                    (entry.message or "-")[:80],
+                )
+            console.print(table)
+
+        if not exec_entries and not node_entries:
+            console.print(f"No logs found for {workflow_name}")
 
 
 # --------------------------------------------------------------------------- #
@@ -1298,7 +1343,7 @@ def metrics(
 def lineage(
     workflow_name: str = typer.Argument(..., help="Workflow name"),
 ):
-    """Show data lineage for a workflow."""
+    """Show data lineage for a workflow with human-readable artifact names."""
     workspace = _get_workspace()
     db_manager = _init_db(workspace)
 
@@ -1323,6 +1368,13 @@ def lineage(
             .all()
         )
 
+        # Build an id -> name lookup for all related artifacts
+        all_related_ids = {e.from_artifact_id for e in edges} | {e.to_artifact_id for e in edges}
+        name_lookup = {}
+        for aid in all_related_ids:
+            art = session.query(ArtifactModel).filter_by(artifact_id=aid).first()
+            name_lookup[aid] = art.name if art else aid[:8]
+
     if not edges:
         console.print(f"No lineage edges found for {workflow_name}")
         return
@@ -1333,30 +1385,38 @@ def lineage(
     table.add_column("Type", style="green")
 
     for edge in edges:
-        table.add_row(edge.from_artifact_id[:8], edge.to_artifact_id[:8], edge.edge_type)
+        from_label = f"{name_lookup.get(edge.from_artifact_id, edge.from_artifact_id[:8])} ({edge.from_artifact_id[:8]})"
+        to_label = f"{name_lookup.get(edge.to_artifact_id, edge.to_artifact_id[:8])} ({edge.to_artifact_id[:8]})"
+        table.add_row(from_label, to_label, edge.edge_type)
 
     console.print(table)
 
 
 # --------------------------------------------------------------------------- #
-# model
+# artifact (replaces model, with backward compatibility)
 # --------------------------------------------------------------------------- #
 
-model_app = typer.Typer(help="Manage model artifacts")
+artifact_app = typer.Typer(help="Manage artifacts (models, data, features)")
+app.add_typer(artifact_app, name="artifact")
+# Backward-compatible alias
+model_app = artifact_app
 app.add_typer(model_app, name="model")
 
 
-@model_app.command("list")
-def model_list(
+@artifact_app.command("list")
+def artifact_list(
+    artifact_type: Optional[str] = typer.Option(None, "--type", "-t", help="Filter by type: model, data, feature"),
     workflow: Optional[str] = typer.Option(None, "--workflow", help="Filter by workflow name"),
 ):
-    """List registered model artifacts."""
+    """List registered artifacts (latest version per name)."""
     workspace = _get_workspace()
     db_manager = _init_db(workspace)
 
     rows: list = []
     with _db_session(db_manager) as session:
-        query = session.query(ArtifactModel).filter_by(artifact_type="model")
+        query = session.query(ArtifactModel)
+        if artifact_type:
+            query = query.filter_by(artifact_type=artifact_type)
         if workflow:
             wf = _lookup_workflow(session, workflow)
             query = query.filter_by(workflow_id=wf.id)
@@ -1379,6 +1439,7 @@ def model_list(
                 (
                     art.name,
                     art.version,
+                    art.artifact_type,
                     wf_name,
                     tags.get("stage", "-"),
                     art.created_at.strftime("%Y-%m-%d %H:%M") if art.created_at else "-",
@@ -1386,12 +1447,13 @@ def model_list(
             )
 
     if not rows:
-        console.print("No models found.")
+        console.print("No artifacts found.")
         return
 
-    table = Table(title="Models")
+    table = Table(title="Artifacts")
     table.add_column("Name", style="cyan")
     table.add_column("Version", style="magenta")
+    table.add_column("Type", style="white")
     table.add_column("Workflow", style="green")
     table.add_column("Stage", style="yellow")
     table.add_column("Created", style="blue")
@@ -1402,24 +1464,70 @@ def model_list(
     console.print(table)
 
 
-@model_app.command("promote")
-def model_promote(
+@artifact_app.command("versions")
+def artifact_versions(
+    name: str = typer.Argument(..., help="Artifact name"),
+):
+    """List all versions of a named artifact."""
+    workspace = _get_workspace()
+    db_manager = _init_db(workspace)
+
+    rows: list = []
+    with _db_session(db_manager) as session:
+        artifacts = (
+            session.query(ArtifactModel)
+            .filter_by(name=name)
+            .order_by(ArtifactModel.created_at.desc())
+            .all()
+        )
+        if not artifacts:
+            console.print(f"[yellow]No artifacts found with name:[/yellow] {name}")
+            raise typer.Exit(0)
+
+        for art in artifacts:
+            tags = json.loads(art.tags_json or "{}")
+            rows.append(
+                (
+                    art.name,
+                    art.version,
+                    art.artifact_type,
+                    art.artifact_id[:8],
+                    tags.get("stage", "-"),
+                    art.created_at.strftime("%Y-%m-%d %H:%M") if art.created_at else "-",
+                )
+            )
+
+    table = Table(title=f"Artifact Versions – {name}")
+    table.add_column("Name", style="cyan")
+    table.add_column("Version", style="magenta")
+    table.add_column("Type", style="white")
+    table.add_column("ID", style="green")
+    table.add_column("Stage", style="yellow")
+    table.add_column("Created", style="blue")
+
+    for row in rows:
+        table.add_row(*row)
+
+    console.print(table)
+
+
+@artifact_app.command("promote")
+def artifact_promote(
     version: str = typer.Argument(..., help="Artifact ID or name:version"),
     to: str = typer.Option(..., "--to", help="Target stage (e.g. staging, production)"),
 ):
-    """Promote a model version to a new stage."""
+    """Promote an artifact to a new stage."""
     workspace = _get_workspace()
     db_manager = _init_db(workspace)
     store = _model_store(workspace)
 
     artifact_id = version
-    # Support name:version syntax
     if ":" in version and not _is_uuid(version):
         name, ver = version.split(":", 1)
         with _db_session(db_manager) as session:
             art = (
                 session.query(ArtifactModel)
-                .filter_by(name=name, version=ver, artifact_type="model")
+                .filter_by(name=name, version=ver)
                 .order_by(ArtifactModel.created_at.desc())
                 .first()
             )
@@ -1431,27 +1539,27 @@ def model_promote(
     try:
         store.promote_version(artifact_id, stage=to)
         console.print(f"[green]Promoted[/green] {artifact_id} → {to}")
+        console.print(f"  [dim]Load with:[/dim] pf.load_model(\"{artifact_id}\", stage=\"{to}\")")
     except Exception as exc:
         console.print(f"[red]Promotion failed:[/red] {exc}")
         raise typer.Exit(1)
 
 
-@model_app.command("rollback")
-def model_rollback(
+@artifact_app.command("rollback")
+def artifact_rollback(
     version: str = typer.Argument(..., help="Artifact ID or name:version"),
 ):
-    """Rollback a model version to the previous stage."""
+    """Rollback an artifact to the previous stage."""
     workspace = _get_workspace()
     db_manager = _init_db(workspace)
 
     artifact_id = version
-    # Support name:version syntax
     if ":" in version and not _is_uuid(version):
         name, ver = version.split(":", 1)
         with _db_session(db_manager) as session:
             art = (
                 session.query(ArtifactModel)
-                .filter_by(name=name, version=ver, artifact_type="model")
+                .filter_by(name=name, version=ver)
                 .order_by(ArtifactModel.created_at.desc())
                 .first()
             )
@@ -1466,7 +1574,6 @@ def model_rollback(
             console.print(f"[red]Artifact not found:[/red] {artifact_id}")
             raise typer.Exit(1)
 
-        # Find previous version record
         prev = (
             session.query(ArtifactVersionModel)
             .filter_by(artifact_id=artifact_id)
@@ -1483,6 +1590,7 @@ def model_rollback(
         artifact.tags_json = json.dumps(tags)
 
     console.print(f"[green]Rolled back[/green] {artifact_id} to stage '{prev_stage}'")
+    console.print(f"  [dim]Load with:[/dim] pf.load_model(\"{artifact_id}\", stage=\"{prev_stage}\")")
 
 
 # --------------------------------------------------------------------------- #

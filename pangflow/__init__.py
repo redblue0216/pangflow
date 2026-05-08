@@ -4,7 +4,7 @@
 # Copyright (c) 2026 The PangFlow Authors. All rights reserved.
 
 """
-PangFlow v0.2.11 - Algorithm OPS Orchestration Tool
+PangFlow - Algorithm OPS Orchestration Tool
 
 A workflow management framework that lets algorithm engineers write pure Python
 functions, connect them with the ``>>`` operator, and automatically compile to
@@ -44,7 +44,25 @@ Example
 ...     return forecast
 """
 
-__version__ = "0.2.11"
+import importlib.metadata as _im
+from pathlib import Path
+
+def _read_version() -> str:
+    """Read version from pyproject.toml so development never goes stale."""
+    try:
+        pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+        text = pyproject.read_text(encoding="utf-8")
+        import re as _re
+        m = _re.search(r'^version\s*=\s*"([^"]+)"', text, _re.M)
+        return m.group(1) if m else "0.2.16"
+    except Exception:
+        pass
+    try:
+        return _im.version("pangflow")
+    except Exception:
+        return "0.2.13"
+
+__version__ = _read_version()
 
 from typing import Any, Dict, Optional
 

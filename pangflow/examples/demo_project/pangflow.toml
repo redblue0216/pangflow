@@ -1,0 +1,14 @@
+[pangflow]
+version = "0.2.12"
+workspace = "demo_project"
+
+[database]
+path = "pangflow.db"
+
+[prefect]
+work_pool = "default-process"
+api_url = "http://127.0.0.1:4200/api"
+
+[logging]
+level = "INFO"
+file = "logs/pangflow.log"

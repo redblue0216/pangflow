@@ -1,4 +1,4 @@
-"""PangFlow v0.2.11 sklearn 示例工作流编排
+"""PangFlow v0.2.12 sklearn 示例工作流编排
 
 使用 sklearn Iris 数据集训练 RandomForest 分类器的完整工作流。
 算法运行在独立的 conda 环境（sklearn 依赖安装在算法环境中）。

@@ -1,0 +1,38 @@
+# pangflow Workflow Configuration
+# This is a scheduled workflow template (for inference)
+
+# Workflow name (required)
+name = "my-inference-workflow"
+
+# Algorithm package name (required)
+# Options: PangTS, PangFT
+package = "PangFT"
+
+# Workflow type (required)
+# Options: trigger, scheduled
+type = "scheduled"
+
+# Description (optional)
+description = "My inference workflow description"
+
+# Command to execute (required)
+# For Windows demo, use echo commands
+command = "echo Inference workflow: my-inference-workflow"
+
+# Working directory (optional)
+# working_dir = "."
+
+# Environment variables (optional)
+# [env]
+# MY_VAR = "value"
+
+# Timeout in seconds (optional)
+# timeout = 3600
+
+# Schedule configuration (required for scheduled workflows)
+[schedule]
+# Cron schedule (either cron or interval must be specified)
+cron = "0 * * * *"  # Run every hour
+
+# Alternative: interval in seconds
+# interval = 3600

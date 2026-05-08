@@ -118,10 +118,12 @@ class EnvManager:
             pangflow_spec = importlib.util.find_spec("pangflow")
             if pangflow_spec and pangflow_spec.origin:
                 pangflow_pkg_root = pathlib.Path(pangflow_spec.origin).parent.parent
+                # Use "python" so conda run resolves the env-specific interpreter,
+                # rather than sys.executable which points to the host interpreter.
                 # Try editable install first
                 pip_install_cmd = [
                     "conda", "run", "-n", env_spec.name,
-                    sys.executable, "-m", "pip", "install", "-e", str(pangflow_pkg_root)
+                    "python", "-m", "pip", "install", "-e", str(pangflow_pkg_root)
                 ]
                 try:
                     subprocess.run(pip_install_cmd, check=True, capture_output=True)
@@ -129,7 +131,7 @@ class EnvManager:
                     # Fallback to regular install
                     pip_install_cmd = [
                         "conda", "run", "-n", env_spec.name,
-                        sys.executable, "-m", "pip", "install", str(pangflow_pkg_root)
+                        "python", "-m", "pip", "install", str(pangflow_pkg_root)
                     ]
                     subprocess.run(pip_install_cmd, check=False, capture_output=True)
 
