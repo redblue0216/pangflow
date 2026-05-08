@@ -138,17 +138,7 @@ function startPolling(
         stillRunning = true;
       }
 
-      // Refresh DAG if visible
-      const content = document.getElementById(`node-content-${idx}`);
-      const detailsRow = document.getElementById(`node-details-${idx}`);
-      if (content && detailsRow && !detailsRow.classList.contains('hidden')) {
-        try {
-          const dag = await api.getExecutionDag(ex.run_id || ex.id);
-          renderDag(content, dag);
-        } catch {
-          content.innerHTML = `<p class="text-red-500">Failed to load DAG.</p>`;
-        }
-      }
+          // NOTE: DAG is static (workflow structure only), no need to refresh during polling
     }
 
     if (!stillRunning && pollTimer) {
@@ -173,7 +163,9 @@ async function toggleNodeDetails(event: Event, runId: string, idx: number): Prom
         content.innerHTML = `<p class="text-slate-400 italic">No node-level logs found for this run.</p>`;
         return;
       }
-      renderDag(content, dag);
+      const executionRow = document.querySelector(`tr[data-idx="${idx}"]`);
+      const overallStatus = executionRow?.getAttribute('data-status') || 'unknown';
+      renderDag(content, dag, overallStatus);
     } catch {
       content.innerHTML = `<p class="text-red-500">Failed to load DAG.</p>`;
     }
@@ -182,19 +174,18 @@ async function toggleNodeDetails(event: Event, runId: string, idx: number): Prom
   }
 }
 
-function renderDag(container: HTMLElement, dag: any): void {
+function renderDag(container: HTMLElement, dag: any, overallStatus: string): void {
   const nodes = dag.nodes || [];
   const edges = dag.edges || [];
 
-  // Interleave nodes and arrows
+  // Static workflow structure: all nodes share unified colour
   let flowHtml = '';
   for (let i = 0; i < nodes.length; i++) {
     flowHtml += `<div class="flex flex-col items-center gap-1 min-w-[100px]">
-      <div class="w-10 h-10 rounded-full flex items-center justify-center text-white font-bold text-sm shadow ${getNodeBgClass(nodes[i].status)}">
+      <div class="w-10 h-10 rounded-full flex items-center justify-center text-white font-bold text-sm shadow bg-blue-500">
         ${(nodes[i].node_name || nodes[i].node_id).slice(0, 2).toUpperCase()}
       </div>
       <div class="text-xs font-medium text-slate-700 text-center leading-tight">${nodes[i].node_name || nodes[i].node_id}</div>
-      <div class="text-[10px] text-slate-500">${nodes[i].status}${nodes[i].duration_ms ? ` · ${nodes[i].duration_ms}ms` : ''}</div>
     </div>`;
     if (i < edges.length) {
       flowHtml += `<div class="flex items-center px-1 text-slate-400">
@@ -206,25 +197,19 @@ function renderDag(container: HTMLElement, dag: any): void {
   }
 
   container.innerHTML = `
-    <div class="mb-2 font-semibold text-slate-700">DAG Topology — Run ${dag.run_id?.slice(0, 8)}</div>
+    <div class="mb-2 flex items-center gap-2">
+      <span class="font-semibold text-slate-700">Workflow Structure</span>
+      <span class="inline-flex px-2 py-0.5 rounded-full text-[10px] font-medium ${getStatusClass(overallStatus)}">
+        ${overallStatus}
+      </span>
+    </div>
     <div class="flex items-center gap-2 overflow-x-auto py-3 px-1">
       ${flowHtml}
     </div>
-    ${nodes.some((n: any) => n.exception) ? `
-      <div class="mt-3 p-3 bg-red-50 border border-red-200 rounded text-red-700 text-xs">
-        ${nodes.filter((n: any) => n.exception).map((n: any) => `<div><strong>${n.node_name}:</strong> ${n.exception}</div>`).join('')}
-      </div>
-    ` : ''}
   `;
 }
 
-function getNodeBgClass(status: string): string {
-  const s = status.toLowerCase();
-  if (s === 'success') return 'bg-emerald-500';
-  if (s === 'failed') return 'bg-red-500';
-  if (s === 'running') return 'bg-blue-500 animate-pulse';
-  return 'bg-slate-400';
-}
+// NOTE: getNodeBgClass removed — DAG is now static and all nodes use bg-blue-500
 
 function getStatusClass(status: string): string {
   const s = status.toLowerCase();

@@ -438,7 +438,7 @@ class WorkspaceManager:
 
         config_data = {
             "pangflow": {
-                "version": "0.2.12",
+                "version": "0.2.19",
                 "workspace": str(self.workspace_path.name),
             },
             "database": {

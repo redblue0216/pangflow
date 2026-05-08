@@ -285,11 +285,20 @@ def get_execution_dag(
     run_id: str,
     session: Session = Depends(get_db_session),
 ) -> Dict[str, Any]:
-    """Return DAG structure (nodes + edges) for a run.
+    """Return static DAG structure (nodes + edges) for a run.
 
-    Falls back to execution_logs when node_logs are empty (e.g. scheduled runs
-    or simple trigger runs that never emitted node-level telemetry).
+    Node statuses are unified to the overall execution status so the WebUI
+    renders a static workflow topology rather than per-node runtime states.
+    Falls back to execution_logs when node_logs are empty.
     """
+    # Resolve overall execution status first
+    exec_log = (
+        session.query(ExecutionLogModel)
+        .filter_by(run_id=run_id)
+        .first()
+    )
+    overall_status = exec_log.status if exec_log else "unknown"
+
     logs = (
         session.query(NodeLogModel)
         .filter_by(run_id=run_id)
@@ -297,7 +306,7 @@ def get_execution_dag(
         .all()
     )
 
-    # Build unique nodes from node_logs
+    # Build unique nodes from node_logs — status is unified to overall_status
     node_map: Dict[str, Dict[str, Any]] = {}
     for l in logs:
         nid = l.node_id or l.node_name or "unknown"
@@ -305,25 +314,15 @@ def get_execution_dag(
             node_map[nid] = {
                 "node_id": nid,
                 "node_name": l.node_name or nid,
-                "status": (
-                    "failed" if l.exception else
-                    "success" if (l.message and "success" in l.message) else
-                    "running" if (l.message and "running" in l.message) else
-                    "unknown"
-                ),
-                "duration_ms": l.duration_ms,
-                "timestamp": l.timestamp.isoformat() if l.timestamp else None,
+                "status": overall_status,
+                "duration_ms": None,
+                "timestamp": None,
             }
 
     nodes = list(node_map.values())
 
     # Fallback: if no node_logs, create a virtual node from execution_logs
     if not nodes:
-        exec_log = (
-            session.query(ExecutionLogModel)
-            .filter_by(run_id=run_id)
-            .first()
-        )
         if exec_log:
             wf = (
                 session.query(WorkflowModel)
@@ -334,12 +333,12 @@ def get_execution_dag(
             nodes = [{
                 "node_id": run_id[:8],
                 "node_name": wf_name,
-                "status": exec_log.status or "unknown",
+                "status": overall_status,
                 "duration_ms": None,
-                "timestamp": exec_log.started_at.isoformat() if exec_log.started_at else None,
+                "timestamp": None,
             }]
 
-    # Build chronological edges (simple chain based on timestamp order)
+    # Build chronological edges (simple chain based on node order)
     edges: List[Dict[str, str]] = []
     for i in range(len(nodes) - 1):
         edges.append({

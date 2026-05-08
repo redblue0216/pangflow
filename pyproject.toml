@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pangflow"
-version = "0.2.16"
+version = "0.2.19"
 description = "PangFlow - An algorithm OPS orchestration tool based on Prefect with zero-friction DAG composition"
 readme = "README.md"
 license = {text = "Apache-2.0"}

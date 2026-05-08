@@ -1,4 +1,4 @@
-"""PangFlow v0.2.7 sklearn 示例算法节点 —— 使用 sklearn 自带 Iris 数据集
+"""PangFlow v0.2.19 sklearn 示例算法节点 —— 使用 sklearn 自带 Iris 数据集
 
 这个文件演示了如何在独立 conda 环境中使用 sklearn 进行训练和推理，
 以及如何使用 pf.save_model() 将训练好的模型注册为工件。

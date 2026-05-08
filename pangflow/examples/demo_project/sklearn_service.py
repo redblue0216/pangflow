@@ -1,4 +1,4 @@
-"""PangFlow v0.2.12 sklearn 示例 HTTP 推理服务
+"""PangFlow v0.2.19 sklearn 示例 HTTP 推理服务
 
 暴露已训练的 Iris 分类器作为 REST API。
 推理服务通过 pf.load_model() 从模型仓库加载模型，接收特征向量返回预测结果。

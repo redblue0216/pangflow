@@ -1,4 +1,4 @@
-# PangFlow v0.2.12 sklearn 工作流配置文件（需独立 conda 环境）
+# PangFlow v0.2.19 sklearn 工作流配置文件（需独立 conda 环境）
 # 使用 sklearn Iris 数据集训练 RandomForest 分类器
 
 [workflow]

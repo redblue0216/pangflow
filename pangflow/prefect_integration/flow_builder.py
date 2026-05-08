@@ -429,16 +429,12 @@ class FlowBuilder:
         :return: The deployment name
         '''
 
-        from prefect import serve
         flow_func = self.build()
-        deployment = flow_func.to_deployment(
+        flow_func.serve(
             name=f"{self.workflow_name}-deployment",
-            work_pool_name=work_pool,
             cron=cron,
             interval=interval,
         )
-        # Serve the deployment
-        serve(deployment)
         return f"{self.workflow_name}-deployment"
 
 

@@ -1,4 +1,4 @@
-"""PangFlow v0.2.12 示例工作流编排 —— 演示 >> 运算符
+"""PangFlow v0.2.19 示例工作流编排 —— 演示 >> 运算符
 
 这个文件演示了如何使用 @pf.workflow 装饰器和 >> 运算符编排 DAG，
 以及如何通过 if __name__ == "__main__" 入口直接运行工作流。
@@ -6,22 +6,24 @@
 
 import os
 import pangflow as pf
-from nodes import load_data, process_data, save_result
+from nodes import load_data, process_data, save_result, write_to_file
 
 
 @pf.workflow(name="demo-workflow", schedule="0 * * * *")
 def main_workflow():
-    """演示串行工作流: 加载 -> 处理 -> 保存
+    """演示串行工作流: 加载 -> 处理 -> 保存 -> 写入文件
     
     执行流程:
         1. load_data 生成 [1, 2, 3, 4, 5]
         2. process_data 计算平方 [1, 4, 9, 16, 25]
         3. save_result 保存为制品 {"label": "demo-run", "values": [...], "sum": 55}
            同时调用 pf.save_model() 注册到模型仓库
+        4. write_to_file 将结果追加写入 demo_results.txt，带时间戳
     """
     raw = load_data(n=5)
     processed = process_data(raw)
     result = save_result(processed, label="demo-run")
+    file_path = write_to_file(result)
     return result
 
 

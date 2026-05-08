@@ -222,7 +222,7 @@ class DeploymentManager:
             'import uuid',
             'from datetime import datetime',
             'from typing import Optional, Dict, Any',
-            'from prefect import flow, task, get_run_logger, serve',
+            'from prefect import flow, task, get_run_logger',
             '',
             f'WORKFLOW_ID = "{workflow_state.workflow_id}"',
             f'WORKFLOW_NAME = "{workflow_state.workflow_name}"',
@@ -337,11 +337,10 @@ class DeploymentManager:
             '',
             'if __name__ == "__main__":',
             '    # Serve the flow for deployment',
-            f'    deployment = {flow_func_name}_flow.to_deployment(',
+            f'    {flow_func_name}_flow.serve(',
             f'        name="{workflow_state.workflow_name}-deployment",',
             schedule_config,
             '    )',
-            '    serve(deployment)',
             '',
         ]
         flow_content = '\n'.join(lines)
