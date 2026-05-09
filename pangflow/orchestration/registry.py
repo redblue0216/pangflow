@@ -193,6 +193,11 @@ def workflow(name=None, schedule=None, **kwargs):
             # The proxy __call__ already added them, but ensure they exist.
             dag.validate()
 
+            # Persist the static DAG structure to the database so the WebUI
+            # can render the exact workflow topology without inferring it
+            # from execution logs.
+            _persist_dag(dag, workflow_name)
+
             import os
             from pangflow.env.manager import EnvManager
             from pangflow.orchestration.compiler import FlowCompiler
@@ -239,3 +244,43 @@ def serve(endpoint, method="POST", **kwargs):
         return wrapper
 
     return decorator
+
+
+# ---------------------------------------------------------------------- #
+# DAG persistence helper
+# ---------------------------------------------------------------------- #
+def _persist_dag(dag: DAGBuilder, workflow_name: str) -> None:
+    """Save the static DAG structure to the database (best-effort).
+
+    Looks up the workflow record by *workflow_name* and updates its
+    ``dag_json`` column with the serialized DAG topology.  If the DB is
+    unavailable or the workflow has not been registered yet, the call
+    silently returns so that workflow execution is never blocked.
+    """
+    try:
+        from pangflow.database.connection import get_db_manager, initialize_database
+        from pangflow.database.models import WorkflowModel
+        from pangflow.utils.workspace import find_workspace
+
+        try:
+            db = get_db_manager()
+        except RuntimeError:
+            ws_path = find_workspace()
+            if ws_path is not None:
+                db_url = f"sqlite:///{ws_path / 'pangflow.db'}"
+            else:
+                db_url = None
+            db = initialize_database(db_url)
+
+        with db.get_session() as session:
+            wf = (
+                session.query(WorkflowModel)
+                .filter_by(workflow_name=workflow_name)
+                .first()
+            )
+            if wf is not None:
+                import json
+                wf.dag_json = json.dumps(dag.to_dict())
+    except Exception:
+        # DAG persistence is best-effort; never break workflow execution.
+        logger.debug("Failed to persist DAG for workflow '%s'", workflow_name, exc_info=True)

@@ -35,7 +35,7 @@ class ModelStore:
         version = metadata.get("version", "1.0.0")
         data = pickle.dumps(model)
         checksum = hashlib.sha256(data).hexdigest()
-        key = f"models/{name}/{version}.pkl"
+        key = f"{name}/{version}.pkl"
         storage_key = self.file_backend.write(key, data, metadata)
 
         artifact_id = self.meta_store.register_artifact({
@@ -68,9 +68,22 @@ class ModelStore:
         artifacts = self.meta_store.list_artifacts({"name": name})
         if not artifacts:
             raise FileNotFoundError(f"Model '{name}' not found")
+
+        def _artifact_stage(a: dict) -> Optional[str]:
+            tags = a.get("tags")
+            if isinstance(tags, dict):
+                return tags.get("stage")
+            if isinstance(tags, str):
+                import json
+                try:
+                    return json.loads(tags).get("stage")
+                except json.JSONDecodeError:
+                    return None
+            return None
+
         # If stage is requested, filter by tag; otherwise take the latest.
         if stage:
-            matched = [a for a in artifacts if (a.get("tags") or {}).get("stage") == stage]
+            matched = [a for a in artifacts if _artifact_stage(a) == stage]
             if matched:
                 artifact = matched[-1]
             else:

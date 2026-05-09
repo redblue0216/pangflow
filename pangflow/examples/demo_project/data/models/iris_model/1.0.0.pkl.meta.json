@@ -1,0 +1,1 @@
+{"accuracy": 1.0, "n_estimators": 100, "feature_names": ["sepal length (cm)", "sepal width (cm)", "petal length (cm)", "petal width (cm)"], "target_names": ["setosa", "versicolor", "virginica"], "workflow_id": "2d4ecd92-542c-4cd9-8c9f-abf2770504b3", "node_id": "sklearn-train_f421e001", "name": "iris_model"}

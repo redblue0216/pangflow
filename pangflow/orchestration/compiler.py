@@ -9,6 +9,7 @@ import logging
 import os
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Callable, Dict, List
 
 try:
@@ -412,9 +413,35 @@ class FlowCompiler:
         import pangflow as _pf
         ctx = _pf._get_log_context()
         
+        # Resolve workspace path for subprocess cwd
+        from pangflow.utils.workspace import find_workspace
+        workspace_path = find_workspace()
+
+        # Resolve pangflow package root so the conda subprocess can import it
+        import importlib.util
+        pangflow_spec = importlib.util.find_spec("pangflow")
+        pangflow_pkg_root = (
+            str(Path(pangflow_spec.origin).parent.parent)
+            if (pangflow_spec and pangflow_spec.origin)
+            else ""
+        )
+
         script = (
             "import cloudpickle\n"
             "import os\n"
+            "import sys\n"
+            "from pangflow.utils.workspace import find_workspace\n"
+            "_ws = find_workspace()\n"
+            "if _ws:\n"
+            "    os.chdir(str(_ws))\n"
+        )
+        if pangflow_pkg_root:
+            script += (
+                f"_PANGFLOW_ROOT = {pangflow_pkg_root!r}\n"
+                "if _PANGFLOW_ROOT not in sys.path:\n"
+                "    sys.path.insert(0, _PANGFLOW_ROOT)\n"
+            )
+        script += (
             "import pangflow as _pf\n"
             f"os.environ['PANGFLOW_RUN_ID'] = {ctx.get('run_id')!r}\n"
             f"_pf._set_log_context(\n"
@@ -434,7 +461,13 @@ class FlowCompiler:
         
         try:
             cmd = ["conda", "run", "-n", env_name, "python", script_path]
-            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                cwd=str(workspace_path) if workspace_path else None,
+            )
             if proc.returncode != 0:
                 raise RuntimeError(f"Conda run failed: {proc.stderr}")
             with open(output_path, "rb") as fh:

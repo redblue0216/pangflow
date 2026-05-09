@@ -219,3 +219,43 @@ class DAGBuilder:
     def get_upstream_edges(self, node_id: str) -> List[Edge]:
         """Return all edges whose destination is *node_id*."""
         return [e for e in self.edges if e.to_node_id == node_id]
+
+    # ------------------------------------------------------------------ #
+    # Serialization
+    # ------------------------------------------------------------------ #
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize the DAG structure to a JSON-friendly dictionary.
+
+        Includes node metadata and real topological edges so the WebUI
+        can render the exact workflow graph without inferring it from
+        execution logs.
+        """
+        # Compute layer indices via topological sort
+        layers = self.topological_sort()
+        node_layer: Dict[str, int] = {}
+        for layer_idx, layer in enumerate(layers):
+            for meta in layer:
+                node_layer[meta.node_id] = layer_idx
+
+        nodes = []
+        for meta in self.nodes.values():
+            nodes.append(
+                {
+                    "node_id": meta.node_id,
+                    "node_name": meta.name,
+                    "layer_index": node_layer.get(meta.node_id, 0),
+                }
+            )
+
+        edges = []
+        for edge in self.edges:
+            edges.append(
+                {
+                    "from_node_id": edge.from_node_id,
+                    "to_node_id": edge.to_node_id,
+                    "param_mapping": edge.param_mapping,
+                    "edge_type": edge.edge_type,
+                }
+            )
+
+        return {"nodes": nodes, "edges": edges}

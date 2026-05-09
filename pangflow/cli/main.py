@@ -199,10 +199,12 @@ def init(
     import pangflow as _pf
     pkg_dir = Path(_pf.__file__).parent
     example_dir = pkg_dir / "examples" / "demo_project"
+    # Database files that should NOT be copied – the new workspace gets a fresh DB
+    DB_FILES = {"pangflow.db", "pangflow.db-shm", "pangflow.db-wal"}
     if example_dir.exists():
         copied = 0
         for src_file in example_dir.iterdir():
-            if src_file.is_file():
+            if src_file.is_file() and src_file.name not in DB_FILES:
                 dst = workspace_path / src_file.name
                 if not dst.exists():
                     shutil.copy2(src_file, dst)
@@ -230,6 +232,9 @@ def init(
     console.print(f"  1. Edit workflows in {workspace_path}/workflows/")
     console.print("  2. Register: pangflowctl register <workflow.toml>")
     console.print("  3. Deploy:   pangflowctl deploy <workflow_name>")
+    console.print("")
+    console.print(f"[dim]Tip: export PANGFLOW_WORKSPACE={workspace_path}[/dim]")
+    console.print("      [dim]in your shell profile to make workspace discovery CWD-independent.[/dim]")
 
 
 # --------------------------------------------------------------------------- #
@@ -887,9 +892,39 @@ def serve_start(
     if env is not None:
         # Conda isolation: generate a temporary script and run it via conda run
         import tempfile
+        # Resolve pangflow root so the conda subprocess can import it
+        import importlib.util
+        pangflow_spec = importlib.util.find_spec("pangflow")
+        pangflow_pkg_root = (
+            str(Path(pangflow_spec.origin).parent.parent)
+            if (pangflow_spec and pangflow_spec.origin)
+            else ""
+        )
         script_lines = [
             "import sys",
+            "import os",
+            "from pathlib import Path",
+            "os.chdir(str(Path(__file__).parent))",
             f"sys.path.insert(0, {str(workspace_path)!r})",
+        ]
+        if pangflow_pkg_root:
+            script_lines += [
+                f"_PANGFLOW_ROOT = {pangflow_pkg_root!r}",
+                "if _PANGFLOW_ROOT not in sys.path:",
+                "    sys.path.insert(0, _PANGFLOW_ROOT)",
+            ]
+        script_lines += [
+            "",
+            "# Ensure runtime deps are available in the conda env",
+            "_MISSING = []",
+            "for _pkg in ('pydantic', 'fastapi', 'uvicorn'):",
+            "    try:",
+            "        __import__(_pkg)",
+            "    except ImportError:",
+            "        _MISSING.append(_pkg)",
+            "if _MISSING:",
+            "    import subprocess as _sp, sys as _sys",
+            "    _sp.check_call([_sys.executable, '-m', 'pip', 'install', '--quiet'] + _MISSING)",
             "",
             "import importlib.util",
         ]
@@ -933,25 +968,32 @@ def serve_start(
             script_path = fh.name
 
         console.print(f"[blue]Starting serve in conda env:[/blue] {env.name}")
+        log_path = workspace_path / "logs" / f"{workflow_name}_serve.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
         try:
+            log_file = open(str(log_path), "w", encoding="utf-8")
+            log_file.write(f"--- Serve started at {datetime.now().isoformat()} ---\n")
+            log_file.flush()
             if sys.platform == "win32":
                 proc = subprocess.Popen(
                     ["conda", "run", "-n", env.name, "python", script_path],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
                     creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
                 )
             else:
                 proc = subprocess.Popen(
                     ["conda", "run", "-n", env.name, "python", script_path],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
                     start_new_session=True,
                 )
             time.sleep(3)
             if proc.poll() is not None:
-                stdout, stderr = proc.communicate()
-                console.print(f"[red]Serve process failed:[/red] {stderr.decode()}")
+                log_file.flush()
+                with open(str(log_path), "r", encoding="utf-8") as fh:
+                    stderr = fh.read()
+                console.print(f"[red]Serve process failed:[/red] {stderr}")
                 raise typer.Exit(1)
 
             with _db_session(db_manager) as session:
@@ -967,6 +1009,7 @@ def serve_start(
 
 
             console.print(f"[green]Serve started[/green] {workflow_name} at http://{host}:{port} (conda: {env.name})")
+            console.print(f"[dim]Logs: {log_path}[/dim]")
             console.print("Press Ctrl+C to stop.")
             try:
                 proc.wait()
@@ -977,6 +1020,10 @@ def serve_start(
             try:
                 os.unlink(script_path)
             except OSError:
+                pass
+            try:
+                log_file.close()
+            except Exception:
                 pass
         return
 
@@ -1146,13 +1193,25 @@ def trigger(
         else:
             command = model.command
 
+        # Build env vars; inject PYTHONPATH so conda subprocesses can find pangflow
+        env_vars = {"PANGFLOW_RUN_ID": run_id, "PANGFLOW_WORKFLOW_ID": model.id}
+        import importlib.util
+        pangflow_spec = importlib.util.find_spec("pangflow")
+        if pangflow_spec and pangflow_spec.origin:
+            pangflow_pkg_root = str(Path(pangflow_spec.origin).parent.parent)
+            existing_pp = os.environ.get("PYTHONPATH", "")
+            if existing_pp:
+                env_vars["PYTHONPATH"] = f"{pangflow_pkg_root}{os.pathsep}{existing_pp}"
+            else:
+                env_vars["PYTHONPATH"] = pangflow_pkg_root
+
         context = ExecutionContext(
             workflow_id=model.id,
             workflow_name=model.workflow_name,
             workflow_type=model.workflow_type,
             command=command,
             working_dir=model.working_dir,
-            env_vars={"PANGFLOW_RUN_ID": run_id, "PANGFLOW_WORKFLOW_ID": model.id},
+            env_vars=env_vars,
         )
 
         console.print(f"[blue]Triggering[/blue] {workflow_name}  Run ID: {run_id}")

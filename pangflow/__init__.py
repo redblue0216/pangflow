@@ -54,13 +54,13 @@ def _read_version() -> str:
         text = pyproject.read_text(encoding="utf-8")
         import re as _re
         m = _re.search(r'^version\s*=\s*"([^"]+)"', text, _re.M)
-        return m.group(1) if m else "0.2.19"
+        return m.group(1) if m else "0.3.1"
     except Exception:
         pass
     try:
         return _im.version("pangflow")
     except Exception:
-        return "0.2.19"
+        return "0.3.1"
 
 __version__ = _read_version()
 

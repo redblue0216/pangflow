@@ -285,12 +285,16 @@ def get_execution_dag(
     run_id: str,
     session: Session = Depends(get_db_session),
 ) -> Dict[str, Any]:
-    """Return static DAG structure (nodes + edges) for a run.
+    """Return DAG structure (nodes + edges) for a run.
 
-    Node statuses are unified to the overall execution status so the WebUI
-    renders a static workflow topology rather than per-node runtime states.
-    Falls back to execution_logs when node_logs are empty.
+    Prefers the persisted static DAG from the workflow record so the real
+    topology (parallel branches, multi-input nodes) is preserved.  Runtime
+    status from ``node_logs`` is overlaid on top of the static nodes.
+    Falls back to the old chronological-chain behaviour when no static DAG
+    is available.
     """
+    import json
+
     # Resolve overall execution status first
     exec_log = (
         session.query(ExecutionLogModel)
@@ -298,7 +302,75 @@ def get_execution_dag(
         .first()
     )
     overall_status = exec_log.status if exec_log else "unknown"
+    workflow_id = exec_log.workflow_id if exec_log else None
 
+    # ------------------------------------------------------------------ #
+    # Try the persisted static DAG first
+    # ------------------------------------------------------------------ #
+    if workflow_id:
+        wf = session.query(WorkflowModel).filter_by(id=workflow_id).first()
+        if wf and wf.dag_json:
+            try:
+                dag_data = json.loads(wf.dag_json)
+            except json.JSONDecodeError:
+                dag_data = None
+
+            if dag_data:
+                # Build runtime status map from node_logs (latest record per node)
+                logs = (
+                    session.query(NodeLogModel)
+                    .filter_by(run_id=run_id)
+                    .order_by(NodeLogModel.timestamp.asc())
+                    .all()
+                )
+                runtime_map: Dict[str, Dict[str, Any]] = {}
+                for l in logs:
+                    nid = l.node_id or l.node_name or "unknown"
+                    runtime_map[nid] = {
+                        "status": (
+                            "failed"
+                            if l.exception
+                            else "success"
+                            if (l.message and "success" in l.message)
+                            else "running"
+                            if (l.message and "running" in l.message)
+                            else overall_status
+                        ),
+                        "duration_ms": l.duration_ms,
+                        "timestamp": l.timestamp.isoformat() if l.timestamp else None,
+                    }
+
+                # Merge static nodes with runtime status
+                nodes = []
+                for n in dag_data.get("nodes", []):
+                    nid = n.get("node_id", "unknown")
+                    rt = runtime_map.get(nid, {})
+                    nodes.append(
+                        {
+                            "node_id": nid,
+                            "node_name": n.get("node_name", nid),
+                            "status": rt.get("status", overall_status),
+                            "duration_ms": rt.get("duration_ms"),
+                            "timestamp": rt.get("timestamp"),
+                        }
+                    )
+
+                # Use real topological edges
+                edges = []
+                for e in dag_data.get("edges", []):
+                    edges.append(
+                        {
+                            "from": e.get("from_node_id", ""),
+                            "to": e.get("to_node_id", ""),
+                            "type": e.get("edge_type", "data_flow"),
+                        }
+                    )
+
+                return {"run_id": run_id, "nodes": nodes, "edges": edges}
+
+    # ------------------------------------------------------------------ #
+    # Fallback: old chronological-chain logic
+    # ------------------------------------------------------------------ #
     logs = (
         session.query(NodeLogModel)
         .filter_by(run_id=run_id)
@@ -306,7 +378,6 @@ def get_execution_dag(
         .all()
     )
 
-    # Build unique nodes from node_logs — status is unified to overall_status
     node_map: Dict[str, Dict[str, Any]] = {}
     for l in logs:
         nid = l.node_id or l.node_name or "unknown"
@@ -330,22 +401,26 @@ def get_execution_dag(
                 .first()
             )
             wf_name = wf.workflow_name if wf else (exec_log.workflow_id or "workflow")
-            nodes = [{
-                "node_id": run_id[:8],
-                "node_name": wf_name,
-                "status": overall_status,
-                "duration_ms": None,
-                "timestamp": None,
-            }]
+            nodes = [
+                {
+                    "node_id": run_id[:8],
+                    "node_name": wf_name,
+                    "status": overall_status,
+                    "duration_ms": None,
+                    "timestamp": None,
+                }
+            ]
 
     # Build chronological edges (simple chain based on node order)
     edges: List[Dict[str, str]] = []
     for i in range(len(nodes) - 1):
-        edges.append({
-            "from": nodes[i]["node_id"],
-            "to": nodes[i + 1]["node_id"],
-            "type": "data_flow",
-        })
+        edges.append(
+            {
+                "from": nodes[i]["node_id"],
+                "to": nodes[i + 1]["node_id"],
+                "type": "data_flow",
+            }
+        )
 
     return {"run_id": run_id, "nodes": nodes, "edges": edges}
 

@@ -48,6 +48,7 @@ class WorkflowModel(Base):
     flow_file_path = Column(String(500), nullable=True)
     prefect_serve_pid = Column(Integer, nullable=True)
     prefect_serve_status = Column(String(20), nullable=True)
+    dag_json = Column(Text, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.now)
     updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
 
@@ -79,6 +80,7 @@ class WorkflowModel(Base):
             "flow_file_path": self.flow_file_path,
             "prefect_serve_pid": self.prefect_serve_pid,
             "prefect_serve_status": self.prefect_serve_status,
+            "dag_json": self.dag_json,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -151,6 +153,19 @@ class ArtifactModel(Base):
     )
 
     def to_dict(self) -> dict:
+        import json
+        tags = self.tags_json
+        if isinstance(tags, str):
+            try:
+                tags = json.loads(tags)
+            except json.JSONDecodeError:
+                tags = {}
+        lineage = self.lineage_json
+        if isinstance(lineage, str):
+            try:
+                lineage = json.loads(lineage)
+            except json.JSONDecodeError:
+                lineage = []
         return {
             "artifact_id": self.artifact_id,
             "workflow_id": self.workflow_id,
@@ -164,8 +179,8 @@ class ArtifactModel(Base):
             "size_bytes": self.size_bytes,
             "created_by": self.created_by,
             "created_at": self.created_at.isoformat() if self.created_at else None,
-            "lineage": self.lineage_json,
-            "tags": self.tags_json,
+            "lineage": lineage,
+            "tags": tags,
             "lifecycle": self.lifecycle,
         }
 

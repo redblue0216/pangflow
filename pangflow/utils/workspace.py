@@ -438,7 +438,7 @@ class WorkspaceManager:
 
         config_data = {
             "pangflow": {
-                "version": "0.2.19",
+                "version": "0.3.1",
                 "workspace": str(self.workspace_path.name),
             },
             "database": {
@@ -681,9 +681,9 @@ def find_workspace(current_path: Optional[Path] = None) -> Optional[Path]:
     
     - Key points:
     
-        (1) Starts from current_path or current working directory
+        (1) Checks PANGFLOW_WORKSPACE env var first (highest priority)
 
-        (2) Walks up the directory tree checking for pangflow.toml
+        (2) Falls back to walking up from current_path or CWD
 
         (3) Returns None if no workspace found
     
@@ -693,10 +693,17 @@ def find_workspace(current_path: Optional[Path] = None) -> Optional[Path]:
     :return: 
         - path (Optional[Path]) - Path to the workspace root, or None if not found
     '''
+    # 1. Highest priority: PANGFLOW_WORKSPACE environment variable
+    env_ws = os.environ.get("PANGFLOW_WORKSPACE")
+    if env_ws:
+        p = Path(env_ws).resolve()
+        if (p / WorkspaceManager.CONFIG_FILE).exists():
+            return p
+
     if current_path is None:
         current_path = Path.cwd()
     current_path = current_path.resolve()
-    # Walk up the directory tree
+    # 2. Fallback: walk up the directory tree
     for path in [current_path] + list(current_path.parents):
         config_file = path / WorkspaceManager.CONFIG_FILE
         if config_file.exists():
